@@ -1,0 +1,585 @@
+<script lang="ts" setup>
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Toast } from "@halo-dev/components";
+import EmptyState from "../common/EmptyState.vue";
+import type { AstraHubSettings, NewsDiscoverItem, NewsItem, ReadLaterItem } from "../../types";
+import type { SaveSettingsOptions } from "../../composables/useConfigMap";
+import {
+  fetchNewsBrowse,
+  fetchNewsDiscover,
+  fetchNewsSearch
+} from "../../composables/useNewsHub";
+
+const props = defineProps<{
+  settings: AstraHubSettings;
+  searchQuery?: string;
+  persistSettings?: (options?: SaveSettingsOptions) => Promise<boolean>;
+}>();
+
+const PAGE_SIZE = 40;
+const SOURCE_LIMIT = 80;
+
+const DEFAULT_AVATAR_DATA_URI = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path d="M512 512m-512 0a512 512 0 1 0 1024 0 512 512 0 1 0-1024 0Z" fill="#1A4066"/><path d="M675.623007 719.427534H348.369612a169.86709 169.86709 0 0 0-169.859709 169.867089v11.026784a511.431685 511.431685 0 0 0 666.965432 0v-11.026784a169.86709 169.86709 0 0 0-169.852328-169.867089zM786.783912 461.892345a273.602998 273.602998 0 0 1-74.323771 187.912931H311.539859a274.776532 274.776532 0 1 1 475.244053-187.912931z" fill="#CBD5D8"/><path d="M727.738215 477.731354a215.125616 215.125616 0 0 1-48.631512 136.484128H344.9302A215.716073 215.716073 0 1 1 727.738215 477.731354z" fill="#0E243A"/></svg>`)}`;
+
+const items = ref<NewsItem[]>([]);
+const sources = ref<NewsDiscoverItem[]>([]);
+const selectedSourceId = ref("");
+const refreshedAt = ref("");
+const indexedItems = ref(0);
+const nextCursor = ref("");
+const searchPage = ref(1);
+const hasMore = ref(false);
+const loading = ref(false);
+const loadingMore = ref(false);
+const sourceLoading = ref(false);
+const error = ref("");
+const initialized = ref(false);
+
+// ——— 稍后阅读 ———
+const showReadLater = ref(false);
+let readLaterSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function isBookmarked(item: NewsItem): boolean {
+  return props.settings.readLater.items.some(b => b.url === item.url);
+}
+
+function toggleBookmark(item: NewsItem) {
+  const list = props.settings.readLater.items;
+  const idx = list.findIndex(b => b.url === item.url);
+  if (idx >= 0) {
+    list.splice(idx, 1);
+  } else {
+    list.push({
+      url: item.url,
+      title: item.title || "无标题",
+      summary: item.summary || "",
+      blogTitle: item.blogTitle || "",
+      blogLogo: item.blogLogo || "",
+      publishedAt: item.publishedAt || "",
+      savedAt: new Date().toISOString()
+    });
+  }
+  debounceReadLaterSave();
+}
+
+function debounceReadLaterSave() {
+  if (readLaterSaveTimer) clearTimeout(readLaterSaveTimer);
+  readLaterSaveTimer = setTimeout(() => {
+    props.persistSettings?.({ silentSuccess: true });
+  }, 800);
+}
+
+const readLaterCount = computed(() => props.settings.readLater.items.length);
+
+// 后端 (`/v1/planet/rss-deep-space/browse|search`) 已经按
+// `CASE WHEN published_at <= 1971-01-01 THEN updated_at ELSE published_at END DESC, item_id DESC`
+// 严格排好序并按 cursor 分页。
+// 前端只负责拼接，不再二次排序，避免：
+//   1) 撰写日期为 1970-01-01 的卡片被前端再次按 publishedAt 沉底
+//   2) 每次 append 触发 computed 全量重排导致 v-for 出现 DOM move（视觉抖动）
+//   3) 重排后用户视口里的卡片相对容器顶端的偏移变化，scrollTop 未变带来的"自动滑动"错觉
+
+const appliedSearch = computed(() => String(props.searchQuery || "").trim());
+
+let scrollWrapEl: HTMLElement | null = null;
+let scrollEndTimer: ReturnType<typeof setTimeout> | null = null;
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+const isScrolling = ref(false);
+const scrollWrapRef = ref<HTMLElement | null>(null);
+
+// 哨兵元素 + IntersectionObserver 实现"按需加载"：
+//   - 哨兵在列表末尾，hasMore=true 时渲染
+//   - observer 在哨兵进入视口（含 rootMargin 提前量）时触发一次 loadMoreItems
+//   - 加载完成 + items 追加 > 哨兵被推到新内容下方 > 自动离开视口
+//   - 用户必须再滑动让哨兵重新进入视口才会再次触发
+//   - 抖动时哨兵 isIntersecting 状态不变 > 浏览器不会回调
+const loadMoreSentinelRef = ref<HTMLElement | null>(null);
+let loadMoreObserver: IntersectionObserver | null = null;
+
+function formatTime(value: string) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "未提供";
+  }
+  const ts = Date.parse(raw);
+  if (!Number.isFinite(ts)) {
+    return raw;
+  }
+  return new Date(ts).toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function plainSummary(value: string) {
+  return String(value || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function openItem(item: NewsItem) {
+  const link = String(item.url || "").trim();
+  if (!link) {
+    Toast.warning("该资讯没有可访问的链接");
+    return;
+  }
+  window.open(link, "_blank", "noreferrer");
+}
+
+function searchKeyword() {
+  if (appliedSearch.value) {
+    return appliedSearch.value;
+  }
+  if (selectedSourceId.value) {
+    const source = sources.value.find((s) => s.sourceId === selectedSourceId.value);
+    return source?.blogTitle || source?.blogUrl || "";
+  }
+  return "";
+}
+
+function isBrowseMode() {
+  return !appliedSearch.value && !selectedSourceId.value;
+}
+
+function deduplicateAppend(existing: NewsItem[], incoming: NewsItem[]): NewsItem[] {
+  const seen = new Set(existing.map((item) => item.id));
+  const merged = [...existing];
+  for (const item of incoming) {
+    if (!item.id || seen.has(item.id)) {
+      continue;
+    }
+    seen.add(item.id);
+    merged.push(item);
+  }
+  return merged;
+}
+
+async function reloadItems() {
+  loading.value = true;
+  error.value = "";
+  nextCursor.value = "";
+  searchPage.value = 1;
+  try {
+    let response;
+    if (isBrowseMode()) {
+      response = await fetchNewsBrowse({ pageSize: PAGE_SIZE });
+    } else {
+      const keyword = searchKeyword();
+      response = keyword
+        ? await fetchNewsSearch({ q: keyword, pageSize: PAGE_SIZE })
+        : await fetchNewsBrowse({ pageSize: PAGE_SIZE });
+    }
+    items.value = Array.isArray(response.items) ? response.items : [];
+    nextCursor.value = String(response.nextCursor || "").trim();
+    hasMore.value = Boolean(response.hasMore);
+    refreshedAt.value = response.refreshedAt || "";
+    indexedItems.value = response.indexedItems || 0;
+    searchPage.value = response.page || 1;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "读取资讯失败";
+    items.value = [];
+    hasMore.value = false;
+  } finally {
+    loading.value = false;
+    initialized.value = true;
+  }
+}
+
+async function loadMoreItems() {
+  if (loadingMore.value || loading.value || !hasMore.value) {
+    return;
+  }
+  loadingMore.value = true;
+  try {
+    let response;
+    if (isBrowseMode()) {
+      if (!nextCursor.value) {
+        hasMore.value = false;
+        return;
+      }
+      response = await fetchNewsBrowse({ pageSize: PAGE_SIZE, cursor: nextCursor.value });
+    } else {
+      const keyword = searchKeyword();
+      const nextPage = searchPage.value + 1;
+      response = keyword
+        ? await fetchNewsSearch({ q: keyword, page: nextPage, pageSize: PAGE_SIZE })
+        : await fetchNewsBrowse({ pageSize: PAGE_SIZE, cursor: nextCursor.value });
+      searchPage.value = nextPage;
+    }
+    const more = Array.isArray(response.items) ? response.items : [];
+    items.value = deduplicateAppend(items.value, more);
+    nextCursor.value = String(response.nextCursor || "").trim();
+    hasMore.value = Boolean(response.hasMore) && more.length > 0;
+  } catch (e) {
+    Toast.warning(e instanceof Error ? e.message : "加载更多资讯失败");
+  } finally {
+    loadingMore.value = false;
+  }
+}
+
+async function reloadSources() {
+  sourceLoading.value = true;
+  try {
+    const response = await fetchNewsDiscover({ size: SOURCE_LIMIT });
+    sources.value = Array.isArray(response.items) ? response.items : [];
+  } catch (e) {
+    sources.value = [];
+    Toast.warning(e instanceof Error ? e.message : "读取站点列表失败");
+  } finally {
+    sourceLoading.value = false;
+  }
+}
+
+function selectSource(sourceId: string) {
+  showReadLater.value = false;
+  if (selectedSourceId.value === sourceId) {
+    selectedSourceId.value = "";
+  } else {
+    selectedSourceId.value = sourceId;
+  }
+  const feedEl = scrollWrapRef.value;
+  if (feedEl) {
+    feedEl.scrollTop = 0;
+  }
+  void reloadItems();
+}
+
+function onScroll() {
+  isScrolling.value = true;
+  if (scrollEndTimer) {
+    clearTimeout(scrollEndTimer);
+  }
+  scrollEndTimer = setTimeout(() => {
+    isScrolling.value = false;
+    scrollEndTimer = null;
+  }, 150);
+}
+
+function setupLoadMoreObserver() {
+  if (loadMoreObserver) {
+    loadMoreObserver.disconnect();
+    loadMoreObserver = null;
+  }
+  const sentinel = loadMoreSentinelRef.value;
+  const root = scrollWrapRef.value;
+  if (!sentinel || !root) {
+    return;
+  }
+  loadMoreObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        if (loading.value || loadingMore.value || !hasMore.value) continue;
+        void loadMoreItems();
+      }
+    },
+    {
+      root,
+      rootMargin: "0px 0px 200px 0px",
+      threshold: 0
+    }
+  );
+  loadMoreObserver.observe(sentinel);
+}
+
+onMounted(() => {
+  scrollWrapEl = scrollWrapRef.value;
+  void reloadSources();
+  void reloadItems();
+});
+
+onBeforeUnmount(() => {
+  if (scrollEndTimer) {
+    clearTimeout(scrollEndTimer);
+    scrollEndTimer = null;
+  }
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = null;
+  }
+  if (loadMoreObserver) {
+    loadMoreObserver.disconnect();
+    loadMoreObserver = null;
+  }
+});
+
+// 哨兵元素仅在 hasMore && items.length > 0 时渲染，
+// 重建 observer 的时机严格限制为：
+//   - sentinel DOM 节点首次出现 / 被销毁；
+//   - hasMore 由 false 变 true（重新装载、重新查询）。
+// 不再监听 items.length，避免 append 后 observer 重新挂载时
+// 立刻派发一次 isIntersecting=true 触发"二连发"加载。
+watch(
+  [hasMore, loadMoreSentinelRef],
+  async () => {
+    await nextTick();
+    if (hasMore.value && loadMoreSentinelRef.value && scrollWrapRef.value) {
+      setupLoadMoreObserver();
+    } else if (loadMoreObserver) {
+      loadMoreObserver.disconnect();
+      loadMoreObserver = null;
+    }
+  }
+);
+
+watch(
+  () => props.searchQuery,
+  () => {
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+    }
+    searchDebounceTimer = setTimeout(() => {
+      void reloadItems();
+    }, 300);
+  }
+);
+</script>
+
+<template>
+  <div class="news-wrap">
+    <!-- 加载中：首次未初始化时显示 loading -->
+    <div v-if="!initialized && (loading || sourceLoading)" class="news-global-empty">
+      <div class="uv-loader"><span class="uv-loader-text">loading</span><span class="uv-load"></span></div>
+    </div>
+
+    <!-- 全局无数据：未选择任何源、不在稍后阅读模式、且所有源都没有文章 -->
+    <div v-else-if="initialized && !selectedSourceId && !showReadLater && items.length === 0 && sources.length === 0" class="news-global-empty">
+      <EmptyState
+        :text="error || '暂无资讯'"
+        :hint="error ? '请检查 Hub 地址或网络连接' : '主星还未聚合到任何 RSS 源内容'"
+      />
+    </div>
+
+    <template v-else>
+    <!-- 左侧源列表 -->
+    <aside class="news-sidebar">
+      <div class="news-sidebar-title">
+        <svg viewBox="0 0 24 24" fill="none" width="16" height="16"><path d="M4 11a9 9 0 0 1 9 9" stroke="currentColor" stroke-width="2" stroke-linecap="round" /><path d="M4 4a16 16 0 0 1 16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" /><circle cx="5" cy="19" r="1.6" fill="currentColor" /></svg>
+        <span>RSS 列表</span>
+      </div>
+      <div class="news-sidebar-scroll">
+        <button
+          type="button"
+          class="news-source-item news-source-item--readlater"
+          :class="{ active: showReadLater }"
+          @click="showReadLater = !showReadLater"
+        >
+          <div class="news-source-avatar news-source-avatar--readlater">
+            <svg viewBox="0 0 1024 1024" width="18" height="18" xmlns="http://www.w3.org/2000/svg"><path d="M959.24224 401.32608c-7.36256-24.57088-28.78976-43.22304-63.6928-55.43936a15.36 15.36 0 0 0-1.3824-0.43008l-189.54752-51.4304c-41.09824-62.68416-82.25792-125.34272-123.40736-188.01664-0.17408-0.24576-0.54272-0.8192-0.7168-1.06496-19.79904-27.68896-44.48256-42.94656-69.46304-42.94656-18.06336 0-44.544 7.78752-68.38784 45.2096L337.08032 278.69184c-47.27296 14.32576-94.54592 28.71808-141.84448 43.10016L126.1056 342.81984C93.91104 353.28 73.56928 370.2016 65.64864 393.12896c-8.30976 24.0896-2.46784 52.1728 17.87904 85.87264 0.49152 0.82432 1.03424 1.60768 1.61792 2.34496a203168.54272 203168.54272 0 0 1 124.05248 157.1584c-2.11968 75.5712-4.2752 151.2192-6.47168 226.87232-3.15392 36.21888 2.08896 61.74208 16 78.0288 10.54208 12.3392 25.20064 18.59072 43.5712 18.59072 14.07488 0 30.7712-3.67616 53.2992-11.86816l182.52288-74.2912a116757.43744 116757.43744 0 0 0 207.60064 77.18912c13.62432 4.38784 26.23488 6.60992 37.49888 6.60992 25.68192 0 69.27872-11.81184 72.76544-90.96192a21.24288 21.24288 0 0 0-0.02048-2.42176c-3.81952-67.45088-7.68-134.74304-11.53536-202.08128l-0.0512-0.88576 134.43584-180.78208c20.74112-29.82912 27.61728-57.15968 20.4288-81.1776z" fill="#FCD62C" /><path d="M905.0112 455.04l-139.04896 186.95168a23.63904 23.63904 0 0 0-4.55168 15.43168l0.5376 9.51808c3.82976 66.90304 7.67488 133.7856 11.4688 200.8064-2.35008 46.63296-20.44416 46.63296-30.20288 46.63296-7.08096 0-15.54432-1.56672-24.31488-4.36736a142424.4224 142424.4224 0 0 1-214.05696-79.63136 20.1984 20.1984 0 0 0-14.63808 0.21504l-189.06624 76.9792c-16.9984 6.1696-29.70624 9.1648-38.8352 9.1648-8.85248 0-11.20256-2.74944-12.08832-3.77344-2.45248-2.87744-7.85408-12.90752-5.05344-44.02688 0.03584-0.4864 0.07168-0.96768 0.08704-1.4592 2.2784-78.78656 4.52608-157.55264 6.7328-236.23168a23.6032 23.6032 0 0 0-4.97152-15.21664 163892.8896 163892.8896 0 0 0-128.37376-162.66752c-11.77088-19.80928-16.2816-35.2256-13.02016-44.63616 3.82976-11.10528 20.0192-18.432 32.5632-22.50752L206.9504 365.312c49.8432-15.16544 99.62496-30.3104 149.43232-45.40928a21.36064 21.36064 0 0 0 11.96032-9.3696l109.7216-178.2272c7.27552-11.42272 18.91328-25.05216 32.98304-25.05216 11.37664 0 24.01792 8.91904 35.29216 24.6784 42.65472 64.95744 85.31456 129.90464 127.91296 194.87744a21.28896 21.28896 0 0 0 12.1856 8.98048L882.90816 389.12c20.21888 7.17312 32.91648 16.37376 35.78368 25.93792 2.7392 9.14432-2.2784 23.54176-13.68064 39.98208z" fill="#FCD62C" /></svg>
+          </div>
+          <div class="news-source-meta">
+            <div class="news-source-name">稍后阅读</div>
+            <div class="news-source-sub">{{ readLaterCount }} 篇</div>
+          </div>
+        </button>
+        <button
+          type="button"
+          class="news-source-item"
+          :class="{ active: !selectedSourceId && !showReadLater }"
+          @click="selectSource('')"
+        >
+          <div class="news-source-avatar news-source-avatar--all">
+            <svg viewBox="0 0 24 24" fill="none" width="16" height="16"><path d="M4 11a9 9 0 0 1 9 9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" /><path d="M4 4a16 16 0 0 1 16 16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" /><circle cx="5" cy="19" r="1.8" fill="currentColor" /></svg>
+          </div>
+          <div class="news-source-meta">
+            <div class="news-source-name">全站 RSS</div>
+            <div class="news-source-sub">{{ refreshedAt ? formatTime(refreshedAt) : '' }}</div>
+          </div>
+        </button>
+
+        <div v-if="sourceLoading && sources.length === 0" class="news-sidebar-loading">
+          <span class="uv-loader-text">loading</span>
+        </div>
+
+        <button
+          v-for="source in sources"
+          :key="source.sourceId"
+          type="button"
+          class="news-source-item"
+          :class="{ active: selectedSourceId === source.sourceId }"
+          @click="selectSource(source.sourceId)"
+        >
+          <img
+            class="news-source-avatar"
+            :src="source.blogLogo || DEFAULT_AVATAR_DATA_URI"
+            alt=""
+            @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI"
+          />
+          <div class="news-source-meta">
+            <div class="news-source-name">{{ source.blogTitle || source.blogUrl }}</div>
+            <div class="news-source-sub">{{ source.latestPublishedAt ? formatTime(source.latestPublishedAt) : '未提供发布时间' }}</div>
+          </div>
+        </button>
+      </div>
+    </aside>
+
+    <!-- 右侧文章流 -->
+    <section ref="scrollWrapRef" class="news-feed" :class="{ 'is-scrolling': isScrolling }" @scroll="onScroll">
+      <div v-if="loading" class="news-loading-overlay">
+        <div class="uv-loader"><span class="uv-loader-text">loading</span><span class="uv-load"></span></div>
+      </div>
+
+      <div class="news-feed-header">
+        <span class="news-feed-title-main">{{ showReadLater ? '稍后阅读' : '星链资讯' }}</span>
+        <span v-if="!showReadLater && indexedItems > 0" class="news-feed-title-meta">已聚合 {{ indexedItems }} 条 · {{ formatTime(refreshedAt) }}</span>
+        <span v-if="showReadLater" class="news-feed-title-meta">{{ readLaterCount }} 篇已收藏</span>
+      </div>
+
+      <!-- 稍后阅读视图 -->
+      <template v-if="showReadLater">
+        <div v-if="readLaterCount === 0" class="news-feed-empty">
+          <EmptyState text="暂无收藏" hint="点击资讯卡片上的书签按钮添加" />
+        </div>
+        <article
+          v-for="bookmark in props.settings.readLater.items"
+          :key="bookmark.url"
+          class="news-card"
+        >
+          <div class="news-card-head">
+            <img
+              class="news-card-avatar"
+              :src="bookmark.blogLogo || DEFAULT_AVATAR_DATA_URI"
+              alt=""
+              @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI"
+            />
+            <span class="news-card-blog">{{ bookmark.blogTitle || '未知来源' }}</span>
+            <span class="news-card-title">{{ bookmark.title }}</span>
+            <span class="news-card-time">{{ formatTime(bookmark.publishedAt || bookmark.savedAt) }}</span>
+          </div>
+          <div class="news-card-desc">{{ plainSummary(bookmark.summary) || "暂无摘要" }}</div>
+          <div class="news-card-footer">
+            <div class="news-card-tags">
+              <span class="news-card-tag">收藏于 {{ formatTime(bookmark.savedAt) }}</span>
+            </div>
+            <div class="news-card-actions">
+              <button
+                type="button"
+                class="news-card-btn"
+                @click="props.settings.readLater.items.splice(props.settings.readLater.items.indexOf(bookmark), 1); debounceReadLaterSave()"
+              >取消收藏</button>
+              <button type="button" class="news-card-btn" @click="window.open(bookmark.url, '_blank', 'noreferrer')">打开原文</button>
+            </div>
+          </div>
+        </article>
+      </template>
+
+      <!-- 正常资讯流 -->
+      <template v-else>
+      <div v-if="error" class="news-feed-empty">
+        <EmptyState :text="error" hint="请检查 Hub 地址或网络连接" />
+      </div>
+
+      <div v-else-if="!loading && items.length === 0" class="news-feed-empty">
+        <EmptyState text="暂无资讯" hint="主星还未聚合到符合条件的内容" />
+      </div>
+
+      <article
+        v-for="item in items"
+        :key="item.id || `${item.sourceId}-${item.url}`"
+        class="news-card"
+      >
+        <div class="news-card-head">
+          <img
+            class="news-card-avatar"
+            :src="item.blogLogo || DEFAULT_AVATAR_DATA_URI"
+            alt=""
+            @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI"
+          />
+          <span class="news-card-blog">{{ item.blogTitle || item.blogUrl }}</span>
+          <span class="news-card-title">{{ item.title || "暂无标题" }}</span>
+          <span class="news-card-time">{{ formatTime(item.publishedAt) }}</span>
+        </div>
+        <div class="news-card-desc">{{ plainSummary(item.summary) || "暂无摘要" }}</div>
+        <div class="news-card-footer">
+          <div class="news-card-tags">
+            <span v-if="item.sourceSiteCount" class="news-card-tag">来源 {{ item.sourceSiteCount }} 个星链</span>
+            <span v-if="item.mentionCount" class="news-card-tag">被收录 {{ item.mentionCount }} 次</span>
+            <span v-for="tag in (item.tags || []).slice(0, 3)" :key="tag" class="news-card-tag">{{ tag }}</span>
+          </div>
+            <div class="news-card-actions">
+              <button
+                type="button"
+                class="news-card-btn"
+                @click="toggleBookmark(item)"
+              >
+                {{ isBookmarked(item) ? '取消收藏' : '稍后阅读' }}
+              </button>
+              <button type="button" class="news-card-btn" @click="openItem(item)">打开原文</button>
+            </div>
+        </div>
+      </article>
+
+      <div
+        v-if="hasMore && items.length > 0"
+        ref="loadMoreSentinelRef"
+        class="news-feed-sentinel"
+        aria-hidden="true"
+      ></div>
+
+      <!-- 同一个节点切文案，避免 v-if/v-else 节点切换造成 sentinel 偏移 -->
+      <div v-if="hasMore && items.length > 0" class="news-feed-more">
+        {{ loadingMore ? "加载更多资讯中…" : "滚动加载更多" }}
+      </div>
+      </template>
+    </section>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.news-wrap{flex:1;display:flex;min-height:0;gap:14px;padding:16px 20px;overflow:hidden}
+.news-global-empty{flex:1;display:flex;align-items:center;justify-content:center}
+.news-sidebar{flex:0 0 260px;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.news-sidebar-title{display:flex;align-items:center;gap:8px;padding:14px 16px 10px;font-size:13px;font-weight:700;color:#0369a1;letter-spacing:.06em}
+.news-sidebar-title svg{width:16px;height:16px;color:#0ea5e9}
+.news-sidebar-count{display:inline-flex;align-items:center;height:18px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:600;color:#0369a1;background:#e0f2fe}
+.news-sidebar-scroll{flex:1;min-height:0;overflow-y:auto;padding:0 10px 10px;display:flex;flex-direction:column;gap:8px;scrollbar-width:none;-ms-overflow-style:none}
+.news-sidebar-scroll::-webkit-scrollbar{display:none}
+.news-sidebar-loading{padding:14px;text-align:center;color:#94a3b8;font-size:11px}
+.news-source-item{display:flex;align-items:center;gap:12px;width:100%;padding:10px 14px;border:1px solid rgba(0,0,0,.06);background:#fff;cursor:pointer;border-radius:14px;text-align:left;color:#0f172a;box-shadow:0 1px 4px rgba(15,23,42,.04);transition:background .15s,border-color .15s}
+.news-source-item:hover{background:#f8fafc;border-color:rgba(14,165,233,.2)}
+.news-source-item.active{background:#ecfeff;border-color:#67e8f9;box-shadow:0 0 0 2px rgba(103,232,249,.25)}
+.news-source-avatar{width:36px;height:36px;border-radius:50%;flex-shrink:0;object-fit:cover;background:#e2e8f0}
+.news-source-avatar--all{background:#f1f5f9;border:1px solid #e2e8f0;color:#1d4ed8;display:flex;align-items:center;justify-content:center;border-radius:50%;width:36px;height:36px}
+.news-source-meta{flex:1;min-width:0;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.news-source-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.news-source-sub{font-size:11px;color:#94a3b8;white-space:nowrap;flex-shrink:0}
+.news-feed{flex:1;min-width:0;display:flex;flex-direction:column;overflow-y:auto;padding:0 4px;position:relative;scrollbar-width:none;-ms-overflow-style:none}
+.news-feed::-webkit-scrollbar{display:none}
+.news-feed.is-scrolling .news-card{pointer-events:none}
+.news-feed-header{display:flex;align-items:center;justify-content:space-between;padding:6px 12px 12px;flex-shrink:0;position:sticky;top:0;z-index:2;background:#ffffff}
+.news-feed-title-main{font-size:14px;font-weight:700;color:#0f172a}
+.news-feed-title-meta{font-size:11px;color:#94a3b8;letter-spacing:.04em}
+.news-feed-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:240px}
+.news-card{display:flex;flex-direction:column;gap:8px;padding:12px 14px;margin:0 8px 10px;border:1px solid rgba(0,0,0,.06);border-radius:18px;background:rgba(255,255,255,.85);box-shadow:0 2px 8px rgba(15,23,42,.04)}
+.news-card-head{display:flex;align-items:center;gap:10px;min-width:0}
+.news-card-avatar{width:32px;height:32px;border-radius:50%;flex-shrink:0;object-fit:cover;background:#e2e8f0}
+.news-card-blog{font-size:13px;font-weight:700;color:#7c3aed;white-space:nowrap;flex-shrink:0}
+.news-card-title{font-size:13px;font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.news-card-time{font-size:11px;color:#94a3b8;white-space:nowrap;flex-shrink:0;margin-left:auto}
+.news-card-desc{font-size:12px;line-height:1.5;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.news-card-footer{display:flex;align-items:flex-end;justify-content:space-between;gap:10px}
+.news-card-tags{display:flex;flex-wrap:wrap;gap:6px}
+.news-card-tag{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;background:#f1f5f9;color:#475569;font-size:11px;font-weight:600}
+.news-card-actions{display:flex;flex-direction:row;align-items:center;gap:8px;flex-shrink:0}
+.news-card-time{font-size:11px;color:#94a3b8;white-space:nowrap}
+.news-card-btn{display:inline-flex;align-items:center;outline:none;padding:5px 14px;border:2px dashed #64748b;border-radius:15px;background-color:#f1f5f9;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;transition:transform .2s ease-out;box-shadow:0 0 0 3px #f1f5f9,1.5px 1.5px 3px 1px rgba(0,0,0,.15)}
+.news-card-btn:hover{transform:translateY(-4px) translateX(-2px);box-shadow:0 0 0 3px #f1f5f9,2px 5px 0 0 currentColor}
+.news-card-btn:active{transform:translateY(1px) translateX(1px);box-shadow:0 0 0 3px #f1f5f9,0 0 0 0 currentColor}
+.news-source-item--readlater{margin-bottom:4px}
+.news-source-avatar--readlater{background:linear-gradient(135deg,#fffbeb,#fef3c7);display:flex;align-items:center;justify-content:center}
+.news-feed-more{flex-shrink:0;padding:14px 16px 22px;text-align:center;font-size:12px;color:#94a3b8}
+.news-feed-sentinel{flex-shrink:0;height:1px;width:100%;pointer-events:none}
+.news-loading-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#ffffff;z-index:1;border-radius:14px}
+.uv-loader{width:80px;height:50px;position:relative}
+.uv-loader-text{position:absolute;top:0;padding:0;margin:0;color:#C8B6FF;animation:newsloadtext 3.5s ease both infinite;font-size:.8rem;letter-spacing:1px}
+.uv-load{background-color:#9A79FF;border-radius:50px;display:block;height:16px;width:16px;bottom:0;position:absolute;transform:translateX(64px);animation:newsload 3.5s ease both infinite}
+.uv-load::before{position:absolute;content:"";width:100%;height:100%;background-color:#D1C2FF;border-radius:inherit;animation:newsload2 3.5s ease both infinite}
+@keyframes newsloadtext{0%{letter-spacing:1px;transform:translateX(0)}40%{letter-spacing:2px;transform:translateX(26px)}80%{letter-spacing:1px;transform:translateX(32px)}90%{letter-spacing:2px;transform:translateX(0)}100%{letter-spacing:1px;transform:translateX(0)}}
+@keyframes newsload{0%{width:16px;transform:translateX(0)}40%{width:100%;transform:translateX(0)}80%{width:16px;transform:translateX(64px)}90%{width:100%;transform:translateX(0)}100%{width:16px;transform:translateX(0)}}
+@keyframes newsload2{0%{transform:translateX(0);width:16px}40%{transform:translateX(0);width:80%}80%{width:100%;transform:translateX(0)}90%{width:80%;transform:translateX(15px)}100%{transform:translateX(0);width:16px}}
+</style>

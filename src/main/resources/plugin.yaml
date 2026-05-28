@@ -1,0 +1,21 @@
+apiVersion: plugin.halo.run/v1alpha1
+kind: Plugin
+metadata:
+  name: PluginAstraHub
+spec:
+  enabled: true
+  requires: ">=2.23.0"
+  version: "${pluginVersion}"
+  author:
+    name: Serenity
+    website: https://www.aobp.cn/
+  logo: /static/logo.svg
+  homepage: https://www.aobp.cn/
+  repo: https://github.com/atangccc/Asrahub
+  issues: https://github.com/atangccc/Asrahub/issues
+  displayName: "AstraHub 星链"
+  description: "将 Halo 站点接入 AstraHub 星链网络，并同步友链数据。"
+  license:
+    - name: "AGPL-3.0"
+      url: https://www.gnu.org/licenses/agpl-3.0.html
+  configMapName: "plugin-astrahub-configmap"

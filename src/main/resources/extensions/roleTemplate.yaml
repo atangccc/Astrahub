@@ -1,0 +1,72 @@
+apiVersion: v1alpha1
+kind: Role
+metadata:
+  name: astrahub-role-template-manage
+  labels:
+    halo.run/role-template: "true"
+  annotations:
+    rbac.authorization.halo.run/module: "AstraHub 星链"
+    rbac.authorization.halo.run/display-name: "AstraHub 星链管理"
+    rbac.authorization.halo.run/ui-permissions: |
+      ["plugin:astrahub:manage"]
+rules:
+  - apiGroups: ["api.plugin.halo.run"]
+    resources:
+      - "astrahub/boarding/send-code"
+      - "astrahub/boarding/restore"
+      - "astrahub/collect-links"
+      - "astrahub/export-link-edges"
+      - "astrahub/friend-invitations"
+      - "astrahub/friend-invitations/ack"
+      - "astrahub/friend-invitations/cancel"
+      - "astrahub/friend-invitations/delete"
+      - "astrahub/friend-invitations/inbox/sync"
+      - "astrahub/friend-invitations/link-groups"
+      - "astrahub/friend-invitations/reconcile"
+      - "astrahub/friend-invitations/retry"
+      - "astrahub/friend-invitations/review"
+      - "astrahub/friend-invitations/sync"
+      - "astrahub/friend-invitations/outbox/sync"
+      - "astrahub/friend-invitations/{inviteId}/ack"
+      - "astrahub/friend-invitations/{inviteId}/cancel"
+      - "astrahub/friend-invitations/{inviteId}/delete"
+      - "astrahub/friend-invitations/{inviteId}/reconcile"
+      - "astrahub/friend-invitations/{inviteId}/retry"
+      - "astrahub/friend-invitations/{inviteId}/review"
+      - "astrahub/graph/my-site"
+      - "astrahub/graph/nodes/{nodeId}"
+      - "astrahub/graph/sites/{siteId}/relations"
+      - "astrahub/graph/avatar"
+      - "astrahub/planet-clusters"
+      - "astrahub/planet-feed"
+      - "astrahub/planet-links"
+      - "astrahub/news/browse"
+      - "astrahub/news/discover"
+      - "astrahub/news/search"
+      - "astrahub/push-graph"
+      - "astrahub/push-link-edges"
+      - "astrahub/register"
+      - "astrahub/repair-link-edges"
+      - "astrahub/report-status"
+      - "astrahub/site-relations/batch"
+      - "astrahub/sites/lookup"
+      - "astrahub/transform-bp-graph"
+      - "astrahub/ws-token"
+    verbs: ["get", "list", "create"]
+  - apiGroups: ["api.plugin.halo.run"]
+    resources: ["astrahub/ws/report-status"]
+    verbs: ["get", "watch"]
+  - apiGroups: ["api.plugin.halo.run"]
+    resources: ["plugins/-/json-config"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: v1alpha1
+kind: Role
+metadata:
+  name: astrahub-role-template-anonymous-public
+  labels:
+    rbac.authorization.halo.run/aggregate-to-anonymous: "true"
+rules:
+  - apiGroups: ["anonymous.astrahub.halo.run"]
+    resources: ["*"]
+    verbs: ["get", "watch"]

@@ -1,0 +1,8 @@
+.gradle/
+.gradle-home/
+.gradle-user-home/
+build/
+console/node_modules/
+gradle_cache2/
+workplace/
+out/
