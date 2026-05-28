@@ -2,7 +2,7 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-将 Halo 站点接入 [AstraHub 星链](https://www.aobp.cn/) 网络，把站点加入面向独立博客生态的协作图谱，与全网博主形成可联动、可检索、可探索的关系网络。
+将 Halo 站点接入AstraHub 星链网络，把站点加入面向独立博客生态的协作图谱，与全网博主形成可联动、可检索、可探索的关系网络。
 
 ## 介绍
 
