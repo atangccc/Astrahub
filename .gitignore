@@ -1,8 +1,38 @@
+# Gradle
 .gradle/
 .gradle-home/
 .gradle-user-home/
-build/
-console/node_modules/
 gradle_cache2/
-workplace/
+build/
 out/
+bin/
+
+# 工作目录
+workplace/
+
+# 前端
+console/node_modules/
+console/dist/
+console/.rsbuild/
+console/coverage/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# 日志
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.swp
+*~
