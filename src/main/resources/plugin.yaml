@@ -11,8 +11,8 @@ spec:
     website: https://www.aobp.cn/
   logo: /static/logo.svg
   homepage: https://www.aobp.cn/
-  repo: https://github.com/atangccc/Asrahub
-  issues: https://github.com/atangccc/Asrahub/issues
+  repo: https://github.com/atangccc/Astrahub
+  issues: https://github.com/atangccc/Astrahub/issues
   displayName: "AstraHub 星链"
   description: "将 Halo 站点接入 AstraHub 星链网络，并同步友链数据。"
   license:
