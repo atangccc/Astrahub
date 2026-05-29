@@ -1,4 +1,4 @@
-﻿<script lang="ts" setup>
+<script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Toast, VLoading } from "@halo-dev/components";
 import EmptyState from "../common/EmptyState.vue";
@@ -674,6 +674,43 @@ onMounted(() => {
 const isScrolling = ref(false);
 let scrollEndTimer: ReturnType<typeof setTimeout> | null = null;
 
+function positionFloatingPanel(event: Event, panelSelector: string) {
+  const trigger = event.currentTarget;
+  if (!(trigger instanceof HTMLElement)) {
+    return;
+  }
+  const panel = trigger.querySelector(panelSelector) as HTMLElement | null;
+  if (!panel) {
+    return;
+  }
+  // 让 panel 先按内容自然展开，再读尺寸
+  panel.style.maxHeight = "";
+  const triggerRect = trigger.getBoundingClientRect();
+  const panelWidth = panel.offsetWidth;
+  const panelHeight = panel.offsetHeight;
+  const gap = 10;
+  const margin = 8;
+  let top = triggerRect.top - panelHeight - gap;
+  if (top < margin) {
+    // 上方空间不够则放到下方
+    top = triggerRect.bottom + gap;
+  }
+  let left = triggerRect.left + triggerRect.width / 2 - panelWidth / 2;
+  const maxLeft = window.innerWidth - panelWidth - margin;
+  if (left > maxLeft) left = maxLeft;
+  if (left < margin) left = margin;
+  panel.style.top = `${top}px`;
+  panel.style.left = `${left}px`;
+}
+
+function positionDescTooltip(event: Event) {
+  positionFloatingPanel(event, ".desc-tooltip");
+}
+
+function positionReviewPopover(event: Event) {
+  positionFloatingPanel(event, ".review-reason-popover");
+}
+
 function onScroll() {
   isScrolling.value = true;
   if (scrollEndTimer) {
@@ -952,9 +989,9 @@ watch(
 .desc-cell{display:flex;align-items:center;justify-content:center;overflow:visible}
 .desc-icon-trigger{position:relative;display:inline-flex;align-items:center;justify-content:center;color:#94a3b8;cursor:pointer;transition:color .15s}
 .desc-icon-trigger:hover{color:#4f46e5}
-.desc-tooltip{position:absolute;left:50%;bottom:calc(100% + 10px);transform:translate(-50%,6px);padding:8px 12px;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);color:#334155;font-size:11px;line-height:1.55;border-radius:10px;border:1px solid rgba(203,213,225,.8);white-space:normal;word-break:break-word;width:220px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,.08);text-align:left;opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease}
-.desc-tooltip::after{content:"";position:absolute;left:50%;bottom:-5px;width:10px;height:10px;transform:translateX(-50%) rotate(45deg);background:rgba(255,255,255,.95);border-right:1px solid rgba(203,213,225,.8);border-bottom:1px solid rgba(203,213,225,.8)}
-.desc-icon-trigger:hover .desc-tooltip,.desc-icon-trigger:focus-visible .desc-tooltip{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+.desc-tooltip{position:absolute;left:calc(100% + 10px);top:50%;transform:translate(-6px,-50%);padding:8px 12px;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);color:#334155;font-size:11px;line-height:1.55;border-radius:10px;border:1px solid rgba(203,213,225,.8);white-space:normal;word-break:break-word;width:220px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,.08);text-align:left;opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease}
+.desc-tooltip::after{content:"";position:absolute;left:-5px;top:50%;width:10px;height:10px;transform:translateY(-50%) rotate(45deg);background:rgba(255,255,255,.95);border-left:1px solid rgba(203,213,225,.8);border-bottom:1px solid rgba(203,213,225,.8)}
+.desc-icon-trigger:hover .desc-tooltip,.desc-icon-trigger:focus-visible .desc-tooltip{opacity:1;transform:translate(0,-50%);pointer-events:auto}
 .message-meta{color:#64748b;margin-top:4px}
 .review-reason{color:#b91c1c;margin-top:4px}
 .status-cell{display:flex;flex-direction:column;gap:6px;justify-content:center}
@@ -970,14 +1007,14 @@ watch(
 .review-reason-trigger{position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;color:#64748b;background:rgba(241,245,249,.9);border:1px solid rgba(203,213,225,.7);cursor:help;outline:none;transition:color .15s,border-color .15s}
 .review-reason-trigger:hover{color:#4f46e5;border-color:#a5b4fc}
 .review-reason-trigger svg{width:13px;height:13px;display:block}
-.review-reason-popover{position:absolute;left:50%;bottom:calc(100% + 10px);z-index:100;width:max-content;max-width:260px;transform:translate(-50%,6px);padding:9px 12px;border-radius:10px;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);border:1px solid rgba(203,213,225,.8);box-shadow:0 8px 24px rgba(0,0,0,.08);color:#334155;font-size:12px;font-weight:500;line-height:1.6;white-space:normal;word-break:break-word;opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;display:flex;flex-direction:column;gap:4px;text-align:left}
+.review-reason-popover{position:absolute;left:calc(100% + 10px);top:50%;z-index:100;width:max-content;max-width:260px;transform:translate(-6px,-50%);padding:9px 12px;border-radius:10px;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);border:1px solid rgba(203,213,225,.8);box-shadow:0 8px 24px rgba(0,0,0,.08);color:#334155;font-size:12px;font-weight:500;line-height:1.6;white-space:normal;word-break:break-word;opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;display:flex;flex-direction:column;gap:4px;text-align:left}
 .review-reason-line{display:block}
 .review-reason-label{font-weight:700;margin-right:4px}
 .review-reason-label.me{color:#4f46e5}
 .review-reason-label.other{color:#b45309}
 .review-reason-text{color:#334155}
-.review-reason-popover::after{content:"";position:absolute;left:50%;bottom:-5px;width:10px;height:10px;transform:translateX(-50%) rotate(45deg);background:rgba(255,255,255,.92);border-right:1px solid rgba(203,213,225,.8);border-bottom:1px solid rgba(203,213,225,.8)}
-.review-reason-trigger:hover .review-reason-popover,.review-reason-trigger:focus-visible .review-reason-popover{opacity:1;transform:translate(-50%,0)}
+.review-reason-popover::after{content:"";position:absolute;left:-5px;top:50%;width:10px;height:10px;transform:translateY(-50%) rotate(45deg);background:rgba(255,255,255,.92);border-left:1px solid rgba(203,213,225,.8);border-bottom:1px solid rgba(203,213,225,.8)}
+.review-reason-trigger:hover .review-reason-popover,.review-reason-trigger:focus-visible .review-reason-popover{opacity:1;transform:translate(0,-50%)}
 .delivery-text{font-size:11px;color:#94a3b8;line-height:1.5}
 .delivery-icon{display:inline-flex;align-items:center;justify-content:center}
 .delivery-icon.delivery-ok{color:#047857}

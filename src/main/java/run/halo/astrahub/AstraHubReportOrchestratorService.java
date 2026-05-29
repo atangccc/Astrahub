@@ -30,7 +30,8 @@ import java.util.concurrent.atomic.AtomicReference;
 public class AstraHubReportOrchestratorService {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final Duration DEFAULT_INTERVAL = Duration.ofMinutes(1);
+    private static final Duration DEFAULT_INTERVAL = Duration.ofHours(6);
+    private static final int DEFAULT_INTERVAL_MINUTES = (int) DEFAULT_INTERVAL.toMinutes();
     private static final Duration MIN_RETRY_BACKOFF = Duration.ofSeconds(5);
 
     private final ReactiveSettingFetcher settingFetcher;
@@ -223,7 +224,7 @@ public class AstraHubReportOrchestratorService {
     private Mono<SyncPolicy> readSyncPolicy() {
         return readSetting("sync")
             .map(sync -> {
-                int intervalMinutes = Math.max(1, readInt(sync, "intervalMinutes", 60));
+                int intervalMinutes = Math.max(1, readInt(sync, "intervalMinutes", DEFAULT_INTERVAL_MINUTES));
                 int retryBackoffSeconds = Math.max((int) MIN_RETRY_BACKOFF.getSeconds(),
                     readInt(sync, "retryBackoffSeconds", 30));
                 boolean incrementalEnabled = readBoolean(sync, "incrementalEnabled", false);
