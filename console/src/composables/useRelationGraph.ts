@@ -2,13 +2,17 @@ import { computed, ref, shallowRef } from "vue";
 import type {
   GraphNodeDetailResponse,
   GraphNodeFriendLink,
+  GraphNodeListItem,
+  GraphNodesResponse,
   GraphSiteDetailResponse,
 } from "../types";
 
 const ENDPOINT_MY_SITE = "/apis/api.plugin.halo.run/v1alpha1/astrahub/graph/my-site";
+const ENDPOINT_NODES_LIST = "/apis/api.plugin.halo.run/v1alpha1/astrahub/graph/nodes";
 const ENDPOINT_NODE = "/apis/api.plugin.halo.run/v1alpha1/astrahub/graph/nodes";
 
 const FRIEND_LINK_PAGE_SIZE = 100;
+const NODES_FETCH_PAGE_SIZE = 100;
 const BFS_MAX_NODES = 1000;
 const BFS_MAX_CONCURRENCY = 4;
 
@@ -82,10 +86,24 @@ export function useRelationGraph() {
         url: summary.url,
         avatar: summary.avatar,
       };
-      nodes.value.set(selfId, selfCanvasNode);
+
+      const allNodes = await fetchAllNodes();
+      const seededMap = new Map<string, GraphCanvasNode>();
+      seededMap.set(selfId, selfCanvasNode);
+      const seedIds: string[] = [selfId];
+      for (const item of allNodes) {
+        const node = nodeListItemToCanvasNode(item);
+        if (!node.id) continue;
+        if (node.id === selfId) continue;
+        if (seededMap.has(node.id)) continue;
+        seededMap.set(node.id, node);
+        seedIds.push(node.id);
+      }
+      nodes.value = seededMap;
       focusedId.value = selfId;
       bumpProgress();
-      await crawlAll(selfId);
+
+      await crawlAll(seedIds);
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -121,6 +139,30 @@ export function useRelationGraph() {
     return payload as GraphSiteDetailResponse;
   }
 
+  // 分页拉完 /v1/graph/nodes 的所有节点。后端按 ActivityScore + InfluenceScore
+  // 排序，返回顺序天然把活跃节点排前面。
+  async function fetchAllNodes(): Promise<GraphNodeListItem[]> {
+    const collected: GraphNodeListItem[] = [];
+    let page = 1;
+    while (collected.length < BFS_MAX_NODES) {
+      const url =
+        `${ENDPOINT_NODES_LIST}?page=${page}&size=${NODES_FETCH_PAGE_SIZE}&sort=recommendation`;
+      const response = await fetch(url, {
+        method: "GET",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      const payload = (await parseJsonOrThrow(response)) as GraphNodesResponse;
+      const items = payload.items ?? [];
+      if (items.length === 0) break;
+      collected.push(...items);
+      const total = typeof payload.total === "number" ? payload.total : collected.length;
+      if (collected.length >= total) break;
+      page += 1;
+    }
+    return collected.slice(0, BFS_MAX_NODES);
+  }
+
   async function fetchNode(nodeId: string): Promise<GraphNodeDetailResponse> {
     const url = `${ENDPOINT_NODE}/${encodeURIComponent(nodeId)}?size=${FRIEND_LINK_PAGE_SIZE}`;
     const response = await fetch(url, {
@@ -148,9 +190,16 @@ export function useRelationGraph() {
     return payload;
   }
 
-  async function crawlAll(seedNodeId: string) {
-    const queue: string[] = [seedNodeId];
-    const queued = new Set<string>([seedNodeId]);
+  // 多种子 BFS：所有 seed 入队，逐个展开 friend links。已存在节点不重入队，
+  // 仅新增 edge——孤岛节点在 nodesMap 里保留但不连线即可。
+  async function crawlAll(seedNodeIds: string[]) {
+    const queue: string[] = [];
+    const queued = new Set<string>();
+    for (const id of seedNodeIds) {
+      if (!id || queued.has(id)) continue;
+      queued.add(id);
+      queue.push(id);
+    }
     let inflight = 0;
     progress.value = {
       ...progress.value,
@@ -298,6 +347,21 @@ function friendLinkToCanvasNode(link: GraphNodeFriendLink): GraphCanvasNode {
     description: link.description,
     avatar: link.logo,
     raw: link,
+  };
+}
+
+function nodeListItemToCanvasNode(item: GraphNodeListItem): GraphCanvasNode {
+  const summary = item.summary;
+  return {
+    id: summary.nodeId,
+    kind: "registered",
+    nodeId: summary.nodeId,
+    siteId: summary.primarySite?.siteId,
+    title: summary.name,
+    galaxyName: summary.name,
+    subtitle: summary.primarySite?.url,
+    url: summary.primarySite?.url,
+    avatar: summary.avatar,
   };
 }
 

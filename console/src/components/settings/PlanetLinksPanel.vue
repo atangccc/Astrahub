@@ -2,18 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Toast, VLoading } from "@halo-dev/components";
 import EmptyState from "../common/EmptyState.vue";
-import type { AstraHubSettings, AstraHubSiteRelationItem, PlanetLinkItem } from "../../types";
+import type { AstraHubSettings, PlanetLinkItem } from "../../types";
 import type { SaveSettingsOptions } from "../../composables/useConfigMap";
 import { usePlanetLinksLocal } from "../../composables/usePlanetLinksLocal";
 import {
   createFriendInvitation,
-  fetchFriendInvitationLinkGroups,
-  fetchRemoteFriendInvitations,
-  retryFriendInvitation
+  fetchFriendInvitationLinkGroups
 } from "../../composables/useFriendInvitations";
 import { lookupAstraHubSiteByUrl } from "../../composables/useAstraHubSiteLookup";
-import { batchResolveSiteRelations } from "../../composables/useSiteRelations";
-import { useSiteRelationRealtime, type SiteRelationRealtimeEvent } from "../../composables/useSiteRelationRealtime";
 import { useFriendInvitationRealtime, type HubRealtimeEvent } from "../../composables/useFriendInvitationRealtime";
 import type { FriendInvitationItem, LinkGroupOption } from "../../types";
 
@@ -30,15 +26,16 @@ const DEFAULT_AVATAR_DATA_URI = `data:image/svg+xml;charset=UTF-8,${encodeURICom
 
 const {
   loading,
+  loadingMore,
   error,
   items,
   visibleItems,
   hasMore,
   fetchLinks,
-  loadMore
+  loadMore,
+  markOutboxActive
 } = usePlanetLinksLocal();
 
-// ——— 收藏/置顶 ———
 let favSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
 function isFavorite(item: PlanetLinkItem): boolean {
@@ -68,12 +65,12 @@ const orderedItems = computed(() => {
     .map((item, index) => ({
       item,
       index,
-      selfFirstRank: isSelfLink(item) ? 0 : 1,
+      relationRank: relationRankOf(item),
       favRank: isFavorite(item) ? 0 : 1
     }))
     .sort((left, right) => {
-      if (left.selfFirstRank !== right.selfFirstRank) {
-        return left.selfFirstRank - right.selfFirstRank;
+      if (left.relationRank !== right.relationRank) {
+        return left.relationRank - right.relationRank;
       }
       if (left.favRank !== right.favRank) {
         return left.favRank - right.favRank;
@@ -88,7 +85,33 @@ type RelationFilter = "all" | "mutual" | "following" | "pendingBack" | "favorite
 const relationFilter = computed<RelationFilter>(() => props.activeFilter || "all");
 
 function relationKindOf(item: PlanetLinkItem) {
-  return String(relationOf(item)?.relationKind || "").trim().toLowerCase();
+  return String(item.relationKind || "").trim().toLowerCase();
+}
+
+function isInvitablePending(item: PlanetLinkItem) {
+  return canInvite(item) && !item.outboxInvitationActive;
+}
+
+function relationRankOf(item: PlanetLinkItem) {
+  if (isSelfLink(item)) {
+    return 0;
+  }
+  if (!item.targetRegistered) {
+    return 5;
+  }
+  if (!item.targetSupportsInvitation) {
+    if (String(item.targetInvitationState || "").trim() === "credential_missing") {
+      return 4;
+    }
+    return 5;
+  }
+  if (hasLocalLink(item)) {
+    return 1;
+  }
+  if (item.outboxInvitationActive) {
+    return 2;
+  }
+  return 3;
 }
 
 const filteredItems = computed(() => {
@@ -107,7 +130,7 @@ const filteredItems = computed(() => {
       if (relationFilter.value === "following" && kind !== "one_way_out") {
         return false;
       }
-      if (relationFilter.value === "pendingBack" && kind !== "one_way_in") {
+      if (relationFilter.value === "pendingBack" && !isInvitablePending(item)) {
         return false;
       }
     }
@@ -131,31 +154,26 @@ const filteredItems = computed(() => {
 const renderItems = computed(() => filteredItems.value.slice(0, visibleItems.value.length));
 
 const invitingTargets = ref<string[]>([]);
-const outboxInvitationStateByUrl = ref<Record<string, { status: string; deliveryStatus: string }>>({});
-const relationByUrl = ref<Record<string, AstraHubSiteRelationItem>>({});
 const inviteDialogVisible = ref(false);
 const inviteTarget = ref<PlanetLinkItem | null>(null);
 const inviteMessage = ref("");
 const inviteLinkGroupName = ref("");
 const inviteLinkGroups = ref<LinkGroupOption[]>([]);
 const inviteGroupDropdownOpen = ref(false);
-let relationRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-const pendingRelationRefreshUrls = new Set<string>();
-const autoRetryingInviteIds = new Set<string>();
 
 const SIMPLE_STATUS_MAP = {
   relation: {
     mutual: "互相关注",
     oneWayOut: "我已关注",
     oneWayIn: "他已关注",
+    sentInvite: "已发邀请",
     none: "没有关系",
     unknown: "暂未接入"
   }
 } as const;
 
-async function reload() {
-  await fetchLinks();
-  await Promise.all([refreshOutboxInvitations(), refreshRelations()]);
+async function reload(options?: { silent?: boolean }) {
+  await fetchLinks(options);
 }
 
 function primarySourceSite(item: PlanetLinkItem) {
@@ -253,13 +271,9 @@ function sameComparableSiteUrl(leftRawUrl: string, rightRawUrl: string) {
 }
 
 function isSelfLink(item: PlanetLinkItem) {
-  const relation = relationOf(item);
   const selfSiteId = currentSiteId();
-  const targetSiteId = String(relation?.targetIdentity?.siteId || "").trim();
+  const targetSiteId = String(item.targetSiteId || "").trim();
   if (selfSiteId && targetSiteId && selfSiteId === targetSiteId) {
-    return true;
-  }
-  if (relation?.mine?.reason === "self_site" || relation?.theirs?.reason === "self_site") {
     return true;
   }
   return sameComparableSiteUrl(props.settings.connection.siteUrl, item.url);
@@ -269,58 +283,9 @@ function normalizeComparableUrl(rawUrl: string) {
   return String(rawUrl || "").trim().replace(/\/+$/, "").toLowerCase();
 }
 
-function relationKey(rawUrl: string) {
-  return normalizeComparableUrl(rawUrl);
-}
-
-function relationOf(item: PlanetLinkItem) {
-  return relationByUrl.value[relationKey(item.url)] || null;
-}
-
-function urlsOfItems(list: PlanetLinkItem[]) {
-  return list
-    .map((item) => String(item.url || "").trim())
-    .filter(Boolean);
-}
-
 function hasLocalLink(item: PlanetLinkItem) {
-  const relation = relationOf(item);
-  return Boolean(relation?.mine?.known && relation.mine.added);
-}
-
-function registrationState(item: PlanetLinkItem) {
-  if (isSelfLink(item)) {
-    return {
-      known: true,
-      registeredByPlugin: true,
-      credentialReady: true,
-      supportsInvitation: false,
-      invitationState: "self_site",
-      invitationMessage: "current site cannot invite itself"
-    };
-  }
-  const relation = relationOf(item);
-  if (!relation) {
-    return {
-      known: false,
-      registeredByPlugin: false,
-      credentialReady: false,
-      supportsInvitation: false,
-      invitationState: "relation_unavailable",
-      invitationMessage: "site relation is not loaded yet"
-    };
-  }
-  const identity = relation.targetIdentity;
-  const registeredByPlugin = Boolean(identity?.registeredByPlugin ?? identity?.registered);
-  const credentialReady = Boolean(identity?.credentialReady);
-  return {
-    known: true,
-    registeredByPlugin,
-    credentialReady,
-    supportsInvitation: Boolean(identity?.supportsInvitation ?? (registeredByPlugin && credentialReady)),
-    invitationState: String(identity?.invitationState || ""),
-    invitationMessage: String(identity?.invitationMessage || "")
-  };
+  const kind = relationKindOf(item);
+  return kind === "mutual" || kind === "one_way_out";
 }
 
 function invitationStateText(invitationState: string) {
@@ -339,8 +304,6 @@ function invitationStateText(invitationState: string) {
       return "缺少邮箱";
     case "invalid_site_url":
       return "地址无效";
-    case "relation_unavailable":
-      return "等待识别";
     default:
       return "不可邀请";
   }
@@ -361,15 +324,16 @@ function invitationStateTone(invitationState: string) {
       return "warning";
     case "invalid_site_url":
       return "warning";
-    case "relation_unavailable":
-      return "loading";
     default:
       return "muted";
   }
 }
 
 function relationSummary(item: PlanetLinkItem) {
-  const relationKind = String(relationOf(item)?.relationKind || "").trim().toLowerCase();
+  if (!item.targetRegistered) {
+    return { text: SIMPLE_STATUS_MAP.relation.unknown, tone: "muted" };
+  }
+  const relationKind = relationKindOf(item);
   if (relationKind === "mutual") {
     return { text: SIMPLE_STATUS_MAP.relation.mutual, tone: "mutual" };
   }
@@ -379,50 +343,21 @@ function relationSummary(item: PlanetLinkItem) {
   if (relationKind === "one_way_in") {
     return { text: SIMPLE_STATUS_MAP.relation.oneWayIn, tone: "one-way-in" };
   }
-  if (relationKind === "none") {
-    return { text: SIMPLE_STATUS_MAP.relation.none, tone: "muted" };
+  if (item.outboxInvitationActive) {
+    return { text: SIMPLE_STATUS_MAP.relation.sentInvite, tone: "pending" };
   }
-  return { text: SIMPLE_STATUS_MAP.relation.unknown, tone: "muted" };
-}
-
-function invitationSortKey(item: { updatedAt?: string; reviewedAt?: string; createdAt?: string }) {
-  const candidates = [item.updatedAt, item.reviewedAt, item.createdAt];
-  for (const raw of candidates) {
-    const value = String(raw || "").trim();
-    if (!value) {
-      continue;
-    }
-    const time = new Date(value).getTime();
-    if (!Number.isNaN(time)) {
-      return time;
-    }
-  }
-  return 0;
-}
-
-function outboxInvitationStatus(item: PlanetLinkItem) {
-  return outboxInvitationStateByUrl.value[normalizeComparableUrl(item.url)]?.status || "";
-}
-
-function outboxInvitationDeliveryStatus(item: PlanetLinkItem) {
-  return outboxInvitationStateByUrl.value[normalizeComparableUrl(item.url)]?.deliveryStatus || "";
+  return { text: SIMPLE_STATUS_MAP.relation.none, tone: "muted" };
 }
 
 function hasActiveOutboxInvitation(item: PlanetLinkItem) {
-  const status = outboxInvitationStatus(item);
-  const deliveryStatus = outboxInvitationDeliveryStatus(item);
-  if (status === "pending") {
-    return true;
-  }
-  return status === "accepted" && deliveryStatus !== "acknowledged" && !hasLocalLink(item);
+  return Boolean(item.outboxInvitationActive);
 }
 
 function canInvite(item: PlanetLinkItem) {
-  const registration = registrationState(item);
   return (
     !isSelfLink(item) &&
-    registration.known &&
-    registration.supportsInvitation &&
+    Boolean(item.targetRegistered) &&
+    Boolean(item.targetSupportsInvitation) &&
     !hasLocalLink(item) &&
     !hasActiveOutboxInvitation(item) &&
     Boolean(String(item.url || "").trim())
@@ -438,12 +373,12 @@ function inviteButtonText(item: PlanetLinkItem) {
   if (isSelfLink(item)) {
     return "本站链接";
   }
-  const registration = registrationState(item);
-  if (!registration.registeredByPlugin) {
-    return invitationStateText(registration.invitationState);
+  const invitationState = String(item.targetInvitationState || "").trim();
+  if (!item.targetRegistered) {
+    return invitationStateText(invitationState);
   }
-  if (!registration.supportsInvitation) {
-    return invitationStateText(registration.invitationState);
+  if (!item.targetSupportsInvitation) {
+    return invitationStateText(invitationState);
   }
   if (isInviting(item)) {
     return "正在邀请";
@@ -455,7 +390,7 @@ function inviteButtonText(item: PlanetLinkItem) {
     return "已发邀请";
   }
   if (!canInvite(item)) {
-    return invitationStateText(registration.invitationState);
+    return invitationStateText(invitationState);
   }
   return "发起邀请";
 }
@@ -464,12 +399,12 @@ function inviteButtonTone(item: PlanetLinkItem) {
   if (isSelfLink(item)) {
     return "self";
   }
-  const registration = registrationState(item);
-  if (!registration.registeredByPlugin) {
-    return invitationStateTone(registration.invitationState);
+  const invitationState = String(item.targetInvitationState || "").trim();
+  if (!item.targetRegistered) {
+    return invitationStateTone(invitationState);
   }
-  if (!registration.supportsInvitation) {
-    return invitationStateTone(registration.invitationState);
+  if (!item.targetSupportsInvitation) {
+    return invitationStateTone(invitationState);
   }
   if (isInviting(item)) {
     return "loading";
@@ -481,158 +416,9 @@ function inviteButtonTone(item: PlanetLinkItem) {
     return "pending";
   }
   if (!canInvite(item)) {
-    return invitationStateTone(registration.invitationState);
+    return invitationStateTone(invitationState);
   }
   return "action";
-}
-
-async function refreshRelations() {
-  await refreshRelationsForUrls(urlsOfItems(items.value), true);
-}
-
-async function refreshRelationsForUrls(targetUrls: string[], replaceAll = false) {
-  const urls = (Array.isArray(targetUrls) ? targetUrls : [])
-    .map((item) => String(item || "").trim())
-    .filter(Boolean);
-
-  if (!urls.length) {
-    if (replaceAll) {
-      relationByUrl.value = {};
-    }
-    return;
-  }
-
-  try {
-    const response = await batchResolveSiteRelations(urls);
-    const next: Record<string, AstraHubSiteRelationItem> = replaceAll ? {} : { ...relationByUrl.value };
-    for (const url of urls) {
-      delete next[relationKey(url)];
-    }
-    for (const item of response.items || []) {
-      const keys = [
-        relationKey(item.targetUrl || ""),
-        relationKey(item.targetIdentity?.normalizedUrl || ""),
-        relationKey(item.targetIdentity?.siteUrl || ""),
-        relationKey(item.targetIdentity?.queryUrl || "")
-      ].filter(Boolean);
-      for (const key of keys) {
-        next[key] = item;
-      }
-    }
-    relationByUrl.value = next;
-  } catch {
-    if (replaceAll) {
-      relationByUrl.value = {};
-    }
-  }
-}
-
-function scheduleRelationRefresh(urls: string[]) {
-  for (const url of urls) {
-    const key = relationKey(url);
-    if (key) {
-      pendingRelationRefreshUrls.add(key);
-    }
-  }
-  if (relationRefreshTimer) {
-    return;
-  }
-  relationRefreshTimer = setTimeout(() => {
-    const batch = Array.from(pendingRelationRefreshUrls);
-    pendingRelationRefreshUrls.clear();
-    relationRefreshTimer = null;
-    if (!batch.length) {
-      return;
-    }
-    void refreshRelationsForUrls(batch, false);
-  }, 120);
-}
-
-function affectedUrlsByRelationEvent(event: SiteRelationRealtimeEvent) {
-  const currentSiteId = String(props.settings.credentials.siteId || "").trim();
-  const sourceSiteId = String(event.data?.sourceSiteId || "").trim();
-  const sourceSiteUrl = String(event.data?.sourceSiteUrl || "").trim();
-
-  if (!sourceSiteId) {
-    return [];
-  }
-  if (sourceSiteId === currentSiteId) {
-    return urlsOfItems(items.value);
-  }
-
-  const affected = new Set<string>();
-  for (const item of items.value) {
-    const itemUrl = String(item.url || "").trim();
-    const relation = relationOf(item);
-    if (String(relation?.targetIdentity?.siteId || "").trim() === sourceSiteId) {
-      affected.add(itemUrl);
-      continue;
-    }
-    if (sourceSiteUrl && relationKey(itemUrl) === relationKey(sourceSiteUrl)) {
-      affected.add(itemUrl);
-    }
-  }
-  return Array.from(affected);
-}
-
-async function refreshOutboxInvitations() {
-  try {
-    const response = await fetchRemoteFriendInvitations("outbox");
-    const next: Record<string, { status: string; deliveryStatus: string }> = {};
-    const sortedItems = [...(response.items || [])].sort((left, right) => invitationSortKey(right) - invitationSortKey(left));
-    for (const item of sortedItems) {
-      const siteUrl = normalizeComparableUrl(item.toSite?.siteUrl || "");
-      const status = String(item.status || "").trim().toLowerCase();
-      const deliveryStatus = String(item.deliveryStatus || "").trim().toLowerCase();
-      if (!siteUrl || !status) {
-        continue;
-      }
-      if (next[siteUrl]) {
-        continue;
-      }
-      if (status !== "pending" && status !== "accepted") {
-        continue;
-      }
-      next[siteUrl] = { status, deliveryStatus };
-    }
-    outboxInvitationStateByUrl.value = next;
-  } catch {
-    outboxInvitationStateByUrl.value = {};
-  }
-}
-
-async function autoHandleReviewedOutboxInvitation(invitation: FriendInvitationItem) {
-  const inviteId = String(invitation.inviteId || "").trim();
-  const targetUrl = String(invitation.toSite?.siteUrl || "").trim();
-  const status = String(invitation.status || "").trim().toLowerCase();
-  const deliveryStatus = String(invitation.deliveryStatus || "").trim().toLowerCase();
-
-  if (!inviteId || !targetUrl) {
-    return;
-  }
-
-  if (status === "accepted") {
-    if (deliveryStatus === "acknowledged" || autoRetryingInviteIds.has(inviteId)) {
-      scheduleRelationRefresh([targetUrl]);
-      return;
-    }
-    autoRetryingInviteIds.add(inviteId);
-    try {
-      await retryFriendInvitation(inviteId);
-    } catch {
-      // fallback to periodic backend retry
-    } finally {
-      autoRetryingInviteIds.delete(inviteId);
-      await refreshOutboxInvitations();
-      await refreshRelationsForUrls([targetUrl], false);
-    }
-    return;
-  }
-
-  if (status === "rejected" || status === "cancelled" || status === "expired") {
-    await refreshOutboxInvitations();
-    scheduleRelationRefresh([targetUrl]);
-  }
 }
 
 async function inviteLink(item: PlanetLinkItem) {
@@ -711,8 +497,7 @@ async function submitInvite() {
     }
 
     await createFriendInvitation(siteId, inviteMessage.value.trim(), inviteLinkGroupName.value.trim());
-    await refreshOutboxInvitations();
-    await refreshRelationsForUrls([targetUrl], false);
+    markOutboxActive(item.url);
     closeInviteDialog();
     Toast.success("已向该站点发起 AstraHub 邀请");
   } catch (e) {
@@ -742,12 +527,12 @@ function onScroll(event: Event) {
     return;
   }
 
-  if (loading.value || !hasMore.value) {
+  if (loading.value || loadingMore.value || !hasMore.value) {
     return;
   }
   const distanceToBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
   if (distanceToBottom < 80) {
-    loadMore();
+    void loadMore();
   }
 }
 
@@ -780,41 +565,20 @@ useFriendInvitationRealtime(settingsRef, (event: HubRealtimeEvent<FriendInvitati
     return;
   }
   const currentSiteId = String(props.settings.credentials.siteId || "").trim();
-  const targetUrls: string[] = [];
   const isOutboxOwner = String(invitation.fromSite?.siteId || "").trim() === currentSiteId;
-  if (isOutboxOwner) {
-    targetUrls.push(String(invitation.toSite?.siteUrl || "").trim());
+  const isInboxOwner = String(invitation.toSite?.siteId || "").trim() === currentSiteId;
+  if (!isOutboxOwner && !isInboxOwner) {
+    return;
   }
-  if (String(invitation.toSite?.siteId || "").trim() === currentSiteId) {
-    targetUrls.push(String(invitation.fromSite?.siteUrl || "").trim());
-  }
-  if (targetUrls.length) {
-    scheduleRelationRefresh(targetUrls);
-  }
-  void refreshOutboxInvitations();
-  if (isOutboxOwner && event.type === "friend_invitation_reviewed") {
-    void autoHandleReviewedOutboxInvitation(invitation);
-  }
-});
-
-useSiteRelationRealtime(settingsRef, (event: SiteRelationRealtimeEvent) => {
-  const affectedUrls = affectedUrlsByRelationEvent(event);
-  if (affectedUrls.length) {
-    scheduleRelationRefresh(affectedUrls);
-  }
+  void reload({ silent: true });
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("click", handleDocumentClick);
-  if (relationRefreshTimer) {
-    clearTimeout(relationRefreshTimer);
-    relationRefreshTimer = null;
-  }
   if (scrollEndTimer) {
     clearTimeout(scrollEndTimer);
     scrollEndTimer = null;
   }
-  pendingRelationRefreshUrls.clear();
 });
 
 watch(
@@ -827,7 +591,7 @@ watch(
 watch(
   () => props.settings.credentials.siteId,
   () => {
-    void refreshRelations();
+    void reload();
   }
 );
 
@@ -873,8 +637,6 @@ watch(
             </p>
           </div>
         </section>
-
-        <!-- 关系筛选已移到顶部栏 -->
 
         <div class="planet-links-table">
           <div v-if="error" class="planet-links-empty">
@@ -1166,6 +928,7 @@ watch(
 .relation-summary-pill.mutual{background:#ecfdf5;color:#047857}
 .relation-summary-pill.one-way-out{background:#fff7ed;color:#c2410c}
 .relation-summary-pill.one-way-in{background:#eff6ff;color:#2563eb}
+.relation-summary-pill.pending{background:#fff7ed;color:#c2410c}
 .link-url{display:flex;align-items:center;justify-content:center;min-width:0;font-size:12px;color:#334155;line-height:1.45;word-break:break-all;text-align:center}
 .rss-time{display:flex;align-items:center;justify-content:center;font-size:12px;color:#475569;line-height:1.45;word-break:break-word;text-align:center}
 .tag-list{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;overflow:visible;text-align:center}
@@ -1226,8 +989,4 @@ watch(
 .invite-btn-ghost:hover,.invite-btn-primary:hover{transform:translateY(-4px) translateX(-2px);box-shadow:0 0 0 3px #f1f5f9,2px 5px 0 0 currentColor}
 .invite-btn-ghost:active,.invite-btn-primary:active{transform:translateY(1px) translateX(1px);box-shadow:0 0 0 3px #f1f5f9,0 0 0 0 currentColor}
 .invite-btn-primary{border-color:#075985;color:#075985;background-color:#f0f9ff;box-shadow:0 0 0 3px #f0f9ff,1.5px 1.5px 3px 1px rgba(0,0,0,.15)}
-.invite-btn-primary:hover{box-shadow:0 0 0 3px #f0f9ff,2px 5px 0 0 #075985}
-.invite-btn-primary:active{box-shadow:0 0 0 3px #f0f9ff,0 0 0 0 #075985}
-.invite-btn-ghost:disabled,.invite-btn-primary:disabled{opacity:.5;cursor:not-allowed;transform:none}
 </style>
-

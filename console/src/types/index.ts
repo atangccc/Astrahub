@@ -118,6 +118,13 @@ export interface PlanetLinkItem {
   tags?: string[];
   updatedAt: string;
   sourceSites: PlanetLinkSourceSite[];
+  relationKind?: string;
+  targetSiteId?: string;
+  targetRegistered?: boolean;
+  targetSupportsInvitation?: boolean;
+  targetInvitationState?: string;
+  targetInvitationMessage?: string;
+  outboxInvitationActive?: boolean;
 }
 
 export interface PlanetLinksResponse {
@@ -445,6 +452,24 @@ export interface GraphNodeDetailResponse {
   relations?: GraphRelationItem[];
   relatedNodes?: GraphNodeMini[];
   friendLinks: GraphNodeFriendLink[];
+}
+
+/**
+ * 单个图谱节点列表项，对应 hub /v1/graph/nodes 返回的 items 元素。
+ * 关系图前端只用到 summary，所以 metrics 留宽松类型，避免和 hub 端
+ * 字段演进强耦合。
+ */
+export interface GraphNodeListItem {
+  summary: GraphNodeSummary;
+  metrics?: Record<string, unknown>;
+}
+
+export interface GraphNodesResponse {
+  generatedAt: string;
+  page: number;
+  size: number;
+  total: number;
+  items: GraphNodeListItem[];
 }
 
 export const HubPhase = {

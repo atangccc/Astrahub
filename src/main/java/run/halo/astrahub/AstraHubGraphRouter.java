@@ -35,6 +35,8 @@ import static org.springdoc.core.fn.builders.apiresponse.Builder.responseBuilder
  * <ul>
  *   <li>GET astrahub/graph/my-site &rarr; /v1/graph/sites/{ownSiteId}
  *       (returns own site summary so the front-end can resolve its nodeId)</li>
+ *   <li>GET astrahub/graph/nodes &rarr; /v1/graph/nodes
+ *       (full node list — used to seed isolated nodes onto the relation graph)</li>
  *   <li>GET astrahub/graph/nodes/{nodeId} &rarr; /v1/graph/nodes/{nodeId}
  *       (real friend-link expansion — first-degree friends list)</li>
  *   <li>GET astrahub/graph/sites/{siteId}/relations
@@ -66,6 +68,10 @@ public class AstraHubGraphRouter implements CustomEndpoint {
                 builder -> builder.operationId("GetAstraHubGraphMySite").tag(tag)
                     .description("Proxy GET to /v1/graph/sites/{ownSiteId} (signed)")
                     .response(responseBuilder().description("Own site graph summary")))
+            .GET("astrahub/graph/nodes", this::nodesList,
+                builder -> builder.operationId("ListAstraHubGraphNodes").tag(tag)
+                    .description("Proxy GET to /v1/graph/nodes (signed) — full node list, used by relation graph to seed isolated nodes")
+                    .response(responseBuilder().description("Graph node list")))
             .GET("astrahub/graph/nodes/{nodeId}", this::nodeDetail,
                 builder -> builder.operationId("GetAstraHubGraphNodeDetail").tag(tag)
                     .description("Proxy GET to /v1/graph/nodes/{nodeId} (signed)")
@@ -107,6 +113,10 @@ public class AstraHubGraphRouter implements CustomEndpoint {
                 .bodyValue("{\"message\":\"nodeId is invalid\"}");
         }
         return proxy("/v1/graph/nodes/" + safe, mapDetailQuery(request));
+    }
+
+    private Mono<ServerResponse> nodesList(ServerRequest request) {
+        return proxy("/v1/graph/nodes", mapNodesListQuery(request));
     }
 
     private Mono<ServerResponse> siteRelations(ServerRequest request) {
@@ -168,6 +178,25 @@ public class AstraHubGraphRouter implements CustomEndpoint {
         putIfPresent(result, "size", size);
         putIfPresent(result, "relationType", request.queryParam("relationType").orElse(""));
         putIfPresent(result, "sort", request.queryParam("sort").orElse(""));
+        return result;
+    }
+
+    /**
+     * Pass-through query for the /v1/graph/nodes list endpoint. Hub accepts
+     * page / size / sort / updatedSince; the relation graph frontend only uses
+     * page+size+sort (sort=recommendation) but we keep updatedSince available
+     * for future filtering.
+     */
+    private static Map<String, String> mapNodesListQuery(ServerRequest request) {
+        Map<String, String> result = new LinkedHashMap<>();
+        putIfPresent(result, "page", request.queryParam("page").orElse(""));
+        String size = firstNonBlank(
+            request.queryParam("size").orElse(""),
+            request.queryParam("pageSize").orElse("")
+        );
+        putIfPresent(result, "size", size);
+        putIfPresent(result, "sort", request.queryParam("sort").orElse(""));
+        putIfPresent(result, "updatedSince", request.queryParam("updatedSince").orElse(""));
         return result;
     }
 

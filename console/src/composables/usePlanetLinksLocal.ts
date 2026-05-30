@@ -3,7 +3,8 @@ import type { PlanetLinkItem, PlanetLinksResponse } from "../types";
 
 const PAGE_SIZE = 50;
 
-const ENDPOINT = "/apis/api.plugin.halo.run/v1alpha1/astrahub/planet-links";
+const ENDPOINT_PAGED = "/apis/api.plugin.halo.run/v1alpha1/astrahub/planet-links";
+const ENDPOINT_RELATIONS = "/apis/api.plugin.halo.run/v1alpha1/astrahub/planet-links/relations";
 
 function buildQuery(params: Record<string, string | number | undefined>) {
   const usp = new URLSearchParams();
@@ -17,18 +18,27 @@ function buildQuery(params: Record<string, string | number | undefined>) {
   return text ? `?${text}` : "";
 }
 
+interface RelationsResponse {
+  generatedAt: string;
+  items: PlanetLinkItem[];
+}
+
 export function usePlanetLinksLocal() {
   const loading = ref(false);
   const loadingMore = ref(false);
   const error = ref("");
-  const items = ref<PlanetLinkItem[]>([]);
+  const priorityItems = ref<PlanetLinkItem[]>([]);
+  const pagedItems = ref<PlanetLinkItem[]>([]);
   const nextCursor = ref("");
   const hasMore = ref(false);
 
-  const visibleItems = computed(() => items.value);
+  const items = computed<PlanetLinkItem[]>(() => {
+    return [...priorityItems.value, ...pagedItems.value];
+  });
+  const visibleItems = items;
 
-  async function fetchPage(cursor: string): Promise<PlanetLinksResponse> {
-    const url = ENDPOINT + buildQuery({ size: PAGE_SIZE, cursor });
+  async function fetchPagedPage(cursor: string): Promise<PlanetLinksResponse> {
+    const url = ENDPOINT_PAGED + buildQuery({ size: PAGE_SIZE, cursor });
     const response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" }
@@ -40,21 +50,46 @@ export function usePlanetLinksLocal() {
     return (await response.json()) as PlanetLinksResponse;
   }
 
-  async function fetchLinks() {
-    loading.value = true;
-    error.value = "";
+  async function fetchRelations(): Promise<RelationsResponse> {
+    const response = await fetch(ENDPOINT_RELATIONS, {
+      method: "GET",
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as { message?: string };
+      throw new Error(payload.message || `读取关系优先组失败（${response.status}）`);
+    }
+    return (await response.json()) as RelationsResponse;
+  }
+
+  async function fetchLinks(options?: { silent?: boolean }) {
+    const silent = Boolean(options?.silent);
+    if (!silent) {
+      loading.value = true;
+      error.value = "";
+    }
     try {
-      const payload = await fetchPage("");
-      items.value = Array.isArray(payload.items) ? payload.items : [];
+      const [relations, payload] = await Promise.all([fetchRelations(), fetchPagedPage("")]);
+      priorityItems.value = Array.isArray(relations.items) ? relations.items : [];
+      pagedItems.value = Array.isArray(payload.items) ? payload.items : [];
       nextCursor.value = String(payload.nextCursor || "").trim();
-      hasMore.value = Boolean(payload.hasMore);
+      hasMore.value = Boolean(payload.hasMore) && nextCursor.value !== "";
+      if (silent) {
+        error.value = "";
+      }
     } catch (errorValue) {
+      if (silent) {
+        return;
+      }
       error.value = errorValue instanceof Error ? errorValue.message : "读取星球友链失败";
-      items.value = [];
+      priorityItems.value = [];
+      pagedItems.value = [];
       nextCursor.value = "";
       hasMore.value = false;
     } finally {
-      loading.value = false;
+      if (!silent) {
+        loading.value = false;
+      }
     }
   }
 
@@ -64,14 +99,18 @@ export function usePlanetLinksLocal() {
     }
     loadingMore.value = true;
     try {
-      const payload = await fetchPage(nextCursor.value);
+      const payload = await fetchPagedPage(nextCursor.value);
       const more = Array.isArray(payload.items) ? payload.items : [];
-      const seen = new Set(items.value.map((item) => item.url));
+      const seen = new Set(pagedItems.value.map((item) => item.url));
+      const appended: PlanetLinkItem[] = [];
       for (const item of more) {
-        if (item.url && !seen.has(item.url)) {
-          seen.add(item.url);
-          items.value.push(item);
-        }
+        const url = String(item.url || "").trim();
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        appended.push(item);
+      }
+      if (appended.length) {
+        pagedItems.value.push(...appended);
       }
       nextCursor.value = String(payload.nextCursor || "").trim();
       hasMore.value = Boolean(payload.hasMore) && nextCursor.value !== "";
@@ -83,6 +122,20 @@ export function usePlanetLinksLocal() {
     }
   }
 
+  function markOutboxActive(targetUrl: string) {
+    const url = String(targetUrl || "").trim();
+    if (!url) return;
+    const inPriority = priorityItems.value.find((entry) => entry.url === url);
+    if (inPriority) {
+      inPriority.outboxInvitationActive = true;
+      return;
+    }
+    const inPaged = pagedItems.value.find((entry) => entry.url === url);
+    if (inPaged) {
+      inPaged.outboxInvitationActive = true;
+    }
+  }
+
   return {
     loading,
     loadingMore,
@@ -91,6 +144,7 @@ export function usePlanetLinksLocal() {
     visibleItems,
     hasMore,
     fetchLinks,
-    loadMore
+    loadMore,
+    markOutboxActive
   };
 }

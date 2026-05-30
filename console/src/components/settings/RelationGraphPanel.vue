@@ -22,7 +22,6 @@ const {
   edges,
   focusedId,
   progress,
-  bootstrap,
   focusOn,
   reset,
 } = useRelationGraph();
@@ -59,21 +58,94 @@ const selectedNode = ref<GraphCanvasNode | null>(null);
 const detailScreenPos = ref<{ x: number; y: number; visible: boolean } | null>(null);
 let detailRafHandle: number | null = null;
 
+const searchQuery = ref("");
+const searchOpen = ref(false);
+const searchWrapRef = ref<HTMLDivElement | null>(null);
+
 const showProgress = computed(() => {
   return loading.value || progress.value.inflight > 0 || progress.value.pending > 0;
 });
+
+const searchSuggestions = computed<GraphCanvasNode[]>(() => {
+  const keyword = searchQuery.value.trim().toLowerCase();
+  if (!keyword) return [];
+  const out: GraphCanvasNode[] = [];
+  for (const node of nodes.value.values()) {
+    const title = (node.title || "").toLowerCase();
+    const url = (node.url || "").toLowerCase();
+    const galaxy = (node.galaxyName || "").toLowerCase();
+    if (title.includes(keyword) || url.includes(keyword) || galaxy.includes(keyword)) {
+      out.push(node);
+      if (out.length >= 30) break;
+    }
+  }
+  out.sort((a, b) => {
+    if (a.kind !== b.kind) {
+      if (a.kind === "unregistered") return 1;
+      if (b.kind === "unregistered") return -1;
+    }
+    return (a.title || "").localeCompare(b.title || "");
+  });
+  return out;
+});
+
+function buildSuggestionAvatarSrc(node: GraphCanvasNode): string {
+  if (!node.avatar) return DEFAULT_AVATAR_DATA_URI;
+  return `/apis/api.plugin.halo.run/v1alpha1/astrahub/graph/avatar?url=${encodeURIComponent(node.avatar)}`;
+}
+
+function onSuggestionAvatarError(event: Event) {
+  const img = event.target as HTMLImageElement | null;
+  if (!img) return;
+  if (img.src === DEFAULT_AVATAR_DATA_URI) return;
+  img.src = DEFAULT_AVATAR_DATA_URI;
+}
+
+function handleSearchSelect(node: GraphCanvasNode) {
+  selectedNode.value = node;
+  searchOpen.value = false;
+  searchQuery.value = "";
+  if (node.id !== focusedId.value) {
+    focusOn(node.id);
+  } else {
+    flyToNode(node.id);
+  }
+}
+
+function onSearchDocumentClick(event: MouseEvent) {
+  const root = searchWrapRef.value;
+  if (!root) return;
+  const target = event.target;
+  if (target instanceof Node && root.contains(target)) return;
+  searchOpen.value = false;
+}
+
+function resetToOverview() {
+  selectedNode.value = null;
+  hoveredNodeId.value = null;
+  searchQuery.value = "";
+  searchOpen.value = false;
+  if (!graph) return;
+  graph.cameraPosition(
+    { x: 0, y: 0, z: NODE_BOUNDARY_RADIUS * 2.6 },
+    { x: 0, y: 0, z: 0 },
+    800
+  );
+}
 
 onMounted(async () => {
   if (!canvasRef.value) return;
   initGraph(canvasRef.value);
   document.addEventListener("fullscreenchange", onFullscreenChange);
+  document.addEventListener("mousedown", onSearchDocumentClick);
   if (credentialReady.value) {
-    await bootstrap();
+    await reset();
   }
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("fullscreenchange", onFullscreenChange);
+  document.removeEventListener("mousedown", onSearchDocumentClick);
   cancelDetailScreenPos();
   cancelLinkFlowRaf();
   for (const material of linkMaterialByEdgeId.values()) {
@@ -1003,6 +1075,66 @@ const detailCardStyle = computed<Record<string, string>>(() => {
       <div ref="canvasRef" class="rg-canvas"></div>
 
       <div class="rg-toolbar">
+        <div ref="searchWrapRef" class="rg-search">
+          <input
+            type="text"
+            class="rg-search-input"
+            placeholder="搜索站点 / 星系 / 链接"
+            v-model="searchQuery"
+            @focus="searchOpen = true"
+            @input="searchOpen = true"
+          />
+          <button
+            v-if="searchQuery"
+            class="rg-search-clear"
+            type="button"
+            title="清空"
+            @click="searchQuery = ''; searchOpen = false"
+          >
+            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+            </svg>
+          </button>
+          <div v-if="searchOpen && searchQuery.trim()" class="rg-search-suggestions">
+            <div v-if="searchSuggestions.length === 0" class="rg-search-empty">没有匹配的站点</div>
+            <button
+              v-for="node in searchSuggestions"
+              :key="node.id"
+              type="button"
+              class="rg-search-item"
+              :class="{ active: selectedNode && selectedNode.id === node.id }"
+              @click="handleSearchSelect(node)"
+            >
+              <img
+                :src="buildSuggestionAvatarSrc(node)"
+                alt=""
+                class="rg-search-item-avatar"
+                referrerpolicy="no-referrer"
+                crossorigin="anonymous"
+                @error="onSuggestionAvatarError"
+              />
+              <div class="rg-search-item-meta">
+                <div class="rg-search-item-title">{{ node.title || node.url || "未命名站点" }}</div>
+                <div v-if="node.url" class="rg-search-item-sub">{{ node.url }}</div>
+              </div>
+              <span
+                class="rg-search-item-tag"
+                :class="node.kind === 'unregistered' ? 'unregistered' : 'registered'"
+              >{{ node.kind === "unregistered" ? "未接入" : "已接入" }}</span>
+            </button>
+          </div>
+        </div>
+        <button
+          class="rg-tool-btn"
+          type="button"
+          title="重置：取消所有状态，回到整体球视角"
+          @click="resetToOverview"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <path d="M3 12a9 9 0 1 0 3-6.7L3 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M3 3v5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
         <button
           class="rg-tool-btn"
           type="button"
@@ -1150,6 +1282,133 @@ const detailCardStyle = computed<Record<string, string>>(() => {
   background: rgba(99, 102, 241, .35);
   border-color: rgba(165, 180, 252, .55);
   color: #fff;
+}
+
+.rg-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.rg-search-input {
+  width: 220px;
+  height: 32px;
+  padding: 0 28px 0 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, .25);
+  background: rgba(2, 6, 23, .55);
+  color: #e2e8f0;
+  font-size: 12px;
+  outline: none;
+  transition: background .15s ease, border-color .15s ease;
+}
+.rg-search-input::placeholder {
+  color: rgba(148, 163, 184, .8);
+}
+.rg-search-input:focus {
+  background: rgba(2, 6, 23, .85);
+  border-color: rgba(165, 180, 252, .55);
+}
+.rg-search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: none;
+  background: rgba(148, 163, 184, .18);
+  color: #cbd5e1;
+  cursor: pointer;
+}
+.rg-search-clear:hover {
+  background: rgba(148, 163, 184, .35);
+  color: #fff;
+}
+.rg-search-suggestions {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 280px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: rgba(2, 6, 23, .95);
+  border: 1px solid rgba(148, 163, 184, .25);
+  border-radius: 10px;
+  padding: 4px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .55);
+  z-index: 8;
+}
+.rg-search-empty {
+  padding: 12px;
+  color: rgba(148, 163, 184, .8);
+  font-size: 12px;
+  text-align: center;
+}
+.rg-search-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: #e2e8f0;
+  cursor: pointer;
+  text-align: left;
+}
+.rg-search-item:hover,
+.rg-search-item.active {
+  background: rgba(99, 102, 241, .22);
+}
+.rg-search-item-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: rgba(148, 163, 184, .2);
+}
+.rg-search-item-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rg-search-item-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rg-search-item-sub {
+  font-size: 10px;
+  color: rgba(148, 163, 184, .85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rg-search-item-tag {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+.rg-search-item-tag.registered {
+  background: rgba(96, 165, 250, .2);
+  color: #93c5fd;
+}
+.rg-search-item-tag.unregistered {
+  background: rgba(148, 163, 184, .18);
+  color: #cbd5e1;
 }
 
 .rg-detail-card {
