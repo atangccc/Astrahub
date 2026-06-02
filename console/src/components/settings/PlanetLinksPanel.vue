@@ -5,6 +5,7 @@ import EmptyState from "../common/EmptyState.vue";
 import type { AstraHubSettings, PlanetLinkItem } from "../../types";
 import type { SaveSettingsOptions } from "../../composables/useConfigMap";
 import { usePlanetLinksLocal } from "../../composables/usePlanetLinksLocal";
+import { HERO_MASCOT_DATA_URI } from "../../data/heroMascot";
 import {
   createFriendInvitation,
   fetchFriendInvitationLinkGroups
@@ -61,17 +62,16 @@ function debounceSaveFavorites() {
 }
 
 const orderedItems = computed(() => {
+  // 顺序完全由服务端统一流（relationRankOf 关系阶段置顶 + 游标分页）决定，
+  // 前端不再本地重排，只把"收藏"作为唯一的展示置顶偏好叠加在服务端顺序之上。
+  // 这样关系卡片首屏即在最前，无需等全部加载完，从根上消除"滑到底才排到前面"。
   return items.value
     .map((item, index) => ({
       item,
       index,
-      relationRank: relationRankOf(item),
       favRank: isFavorite(item) ? 0 : 1
     }))
     .sort((left, right) => {
-      if (left.relationRank !== right.relationRank) {
-        return left.relationRank - right.relationRank;
-      }
       if (left.favRank !== right.favRank) {
         return left.favRank - right.favRank;
       }
@@ -88,30 +88,21 @@ function relationKindOf(item: PlanetLinkItem) {
   return String(item.relationKind || "").trim().toLowerCase();
 }
 
-function isInvitablePending(item: PlanetLinkItem) {
-  return canInvite(item) && !item.outboxInvitationActive;
+// relationStatusOf 读取服务端权威关系状态；旧数据缺失时退回 relationKind 推导，
+// 保证筛选与标签口径一致（都以 relationStatus 为准）。
+function relationStatusOf(item: PlanetLinkItem) {
+  const status = String(item.relationStatus || "").trim();
+  if (status) return status;
+  const kind = relationKindOf(item);
+  if (kind === "mutual") return "mutual";
+  if (kind === "one_way_out") return "following";
+  if (kind === "one_way_in") return "follower";
+  if (item.outboxInvitationActive) return "invite_sent";
+  return "none";
 }
 
-function relationRankOf(item: PlanetLinkItem) {
-  if (isSelfLink(item)) {
-    return 0;
-  }
-  if (!item.targetRegistered) {
-    return 5;
-  }
-  if (!item.targetSupportsInvitation) {
-    if (String(item.targetInvitationState || "").trim() === "credential_missing") {
-      return 4;
-    }
-    return 5;
-  }
-  if (hasLocalLink(item)) {
-    return 1;
-  }
-  if (item.outboxInvitationActive) {
-    return 2;
-  }
-  return 3;
+function isInvitablePending(item: PlanetLinkItem) {
+  return canInvite(item) && !item.outboxInvitationActive;
 }
 
 const filteredItems = computed(() => {
@@ -123,11 +114,11 @@ const filteredItems = computed(() => {
     if (relationFilter.value === "favorites") {
       if (!isFavorite(item)) return false;
     } else if (relationFilter.value !== "all") {
-      const kind = relationKindOf(item);
-      if (relationFilter.value === "mutual" && kind !== "mutual") {
+      const status = relationStatusOf(item);
+      if (relationFilter.value === "mutual" && status !== "mutual") {
         return false;
       }
-      if (relationFilter.value === "following" && kind !== "one_way_out") {
+      if (relationFilter.value === "following" && status !== "following") {
         return false;
       }
       if (relationFilter.value === "pendingBack" && !isInvitablePending(item)) {
@@ -163,9 +154,11 @@ const inviteGroupDropdownOpen = ref(false);
 
 const SIMPLE_STATUS_MAP = {
   relation: {
+    self: "本站",
     mutual: "互相关注",
     oneWayOut: "我已关注",
     oneWayIn: "他已关注",
+    invitable: "可发起邀请",
     sentInvite: "已发邀请",
     none: "没有关系",
     unknown: "暂未接入"
@@ -330,9 +323,32 @@ function invitationStateTone(invitationState: string) {
 }
 
 function relationSummary(item: PlanetLinkItem) {
-  if (!item.targetRegistered) {
-    return { text: SIMPLE_STATUS_MAP.relation.unknown, tone: "muted" };
+  // 权威关系状态完全由服务端 relationStatus 给定，前端只做「枚举 → 文案/色调」映射，
+  // 绝不再用 targetRegistered / relationKind 自行推断（历史 bug：未接入插件的已关注
+  // 站点被错标成"暂未接入"）。relationStatus 与服务端排序档位同源，标签与位置永远一致。
+  const status = String(item.relationStatus || "").trim();
+  switch (status) {
+    case "self":
+      return { text: SIMPLE_STATUS_MAP.relation.self, tone: "self" };
+    case "mutual":
+      return { text: SIMPLE_STATUS_MAP.relation.mutual, tone: "mutual" };
+    case "following":
+      return { text: SIMPLE_STATUS_MAP.relation.oneWayOut, tone: "one-way-out" };
+    case "follower":
+      return { text: SIMPLE_STATUS_MAP.relation.oneWayIn, tone: "one-way-in" };
+    case "invite_sent":
+      return { text: SIMPLE_STATUS_MAP.relation.sentInvite, tone: "pending" };
+    case "invitable":
+      return { text: SIMPLE_STATUS_MAP.relation.invitable, tone: "muted" };
+    case "none":
+      // 服务端明确判定无关系：已接入的显示"没有关系"，未接入的显示"暂未接入"。
+      return item.targetRegistered
+        ? { text: SIMPLE_STATUS_MAP.relation.none, tone: "muted" }
+        : { text: SIMPLE_STATUS_MAP.relation.unknown, tone: "muted" };
   }
+
+  // 兼容兜底：服务端未返回 relationStatus（旧版本）时，退回基于 relationKind 的判定，
+  // 但已修正优先级——先认关系，再认是否接入，避免已关注站点被误标"暂未接入"。
   const relationKind = relationKindOf(item);
   if (relationKind === "mutual") {
     return { text: SIMPLE_STATUS_MAP.relation.mutual, tone: "mutual" };
@@ -345,6 +361,9 @@ function relationSummary(item: PlanetLinkItem) {
   }
   if (item.outboxInvitationActive) {
     return { text: SIMPLE_STATUS_MAP.relation.sentInvite, tone: "pending" };
+  }
+  if (!item.targetRegistered) {
+    return { text: SIMPLE_STATUS_MAP.relation.unknown, tone: "muted" };
   }
   return { text: SIMPLE_STATUS_MAP.relation.none, tone: "muted" };
 }
@@ -619,6 +638,13 @@ watch(
 
         <!-- Hero 首屏：欢迎语，仿 AstraHub 探索页 -->
         <section ref="heroEl" class="planet-hero">
+          <img
+            :src="HERO_MASCOT_DATA_URI"
+            alt=""
+            aria-hidden="true"
+            class="planet-hero-mascot"
+            draggable="false"
+          />
           <div class="planet-hero-scroll-hint" aria-hidden="true">
             <span class="planet-hero-scroll-text">下滑探索友链</span>
             <svg viewBox="0 0 24 24" fill="none" class="planet-hero-scroll-icon">
@@ -872,6 +898,8 @@ watch(
 .planet-links-table-wrap::-webkit-scrollbar{display:none}
 .planet-links-table-wrap.is-scrolling .planet-links-row,.planet-links-table-wrap.is-scrolling .invite-btn{pointer-events:none}
 .planet-hero{position:relative;display:flex;align-items:center;justify-content:center;min-height:100%;padding:40px 24px 56px;box-sizing:border-box;margin-bottom:16px}
+.planet-hero-mascot{position:absolute;right:calc(50% + 240px);left:auto;top:50%;transform:translateY(-54%);z-index:0;width:clamp(160px,18vw,300px);height:auto;object-fit:contain;opacity:.92;pointer-events:none;user-select:none;-webkit-user-drag:none}
+@media (max-width:1100px){.planet-hero-mascot{display:none}}
 .planet-hero-inner{position:relative;z-index:1;max-width:680px;width:100%;display:flex;flex-direction:column;align-items:center;text-align:center;gap:24px}
 .planet-hero-title{margin:0;font-family:"STHupo","华文琥珀","Chalkboard SE","Yuanti SC","STYuanti","华文圆体","Comic Sans MS","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;font-size:clamp(40px,7vw,76px);line-height:1.2;font-weight:normal;letter-spacing:.04em;color:#0f172a;padding-bottom:8px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .planet-hero-title-accent{display:inline-block;background:linear-gradient(90deg,#38bdf8 0%,#a78bfa 50%,#f472b6 100%);-webkit-background-clip:text;background-clip:text;color:transparent;padding:0 .08em .12em .08em}

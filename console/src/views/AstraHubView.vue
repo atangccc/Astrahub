@@ -2,6 +2,7 @@
 import { onMounted, ref } from "vue";
 import { VLoading } from "@halo-dev/components";
 import { useConfigMap } from "../composables/useConfigMap";
+import { fetchFriendInvitations } from "../composables/useFriendInvitations";
 
 import ConnectionSettings from "../components/settings/ConnectionSettings.vue";
 import FriendInvitationManager from "../components/settings/FriendInvitationManager.vue";
@@ -19,14 +20,27 @@ const planetFilter = ref<PlanetFilter>("all");
 const planetSearch = ref("");
 const newsSearch = ref("");
 const relationRefreshSignal = ref(0);
+// 收件箱待审核数量：用于「友链管理」导航 + 「待审核」tab 的红色提醒角标。
+const pendingInboxCount = ref(0);
 const { loading, saving, settings, fetchSettings, saveSettings } = useConfigMap();
 
 function refreshRelationGraph() {
   relationRefreshSignal.value += 1;
 }
 
+// 拉取收件箱 pending 数量。失败静默（不打扰用户），角标仅在 >0 时显示。
+async function refreshPendingInboxCount() {
+  try {
+    const resp = await fetchFriendInvitations("inbox", "pending");
+    pendingInboxCount.value = Array.isArray(resp.items) ? resp.items.length : 0;
+  } catch {
+    pendingInboxCount.value = 0;
+  }
+}
+
 onMounted(() => {
   fetchSettings();
+  refreshPendingInboxCount();
 });
 </script>
 
@@ -40,6 +54,7 @@ onMounted(() => {
         </button>
         <button class="ah-float-btn" :class="{ active: activeNav === 'friendManagement' }" title="友链管理" @click="activeNav = 'friendManagement'">
           <svg viewBox="0 0 24 24" fill="none" width="16" height="16"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" stroke="currentColor" stroke-width="2" /><circle cx="9" cy="7" r="4" stroke="currentColor" stroke-width="2" /><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" stroke="currentColor" stroke-width="2" /></svg>
+          <span v-if="pendingInboxCount > 0" class="ah-nav-badge">{{ pendingInboxCount > 99 ? '99+' : pendingInboxCount }}</span>
         </button>
         <button class="ah-float-btn" :class="{ active: activeNav === 'news' }" title="资讯" @click="activeNav = 'news'">
           <svg viewBox="0 0 24 24" fill="none" width="16" height="16"><path d="M4 11a9 9 0 0 1 9 9" stroke="currentColor" stroke-width="2" stroke-linecap="round" /><path d="M4 4a16 16 0 0 1 16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" /><circle cx="5" cy="19" r="1.6" fill="currentColor" /></svg>
@@ -61,8 +76,8 @@ onMounted(() => {
       <!-- 顶部栏 -->
       <div class="ah-topbar">
         <div class="ah-topbar-left">
-          <svg viewBox="0 0 1142 1024" width="26" height="23">
-            <path d="M595.895182 473.097102m-420.977778 0a420.977778 420.977778 0 1 0 841.955556 0 420.977778 420.977778 0 1 0-841.955556 0Z" fill="#9BC0D1" /><path d="M595.895182 74.87488c219.582009 0 398.222222 178.640213 398.222222 398.222222s-178.640213 398.222222-398.222222 398.222222-398.222222-178.640213-398.222222-398.222222c0-219.577458 178.644764-398.222222 398.222222-398.222222z m-443.733333 398.222222c0 244.676836 199.056498 443.733333 443.733333 443.733334s443.733333-199.056498 443.733334-443.733334-199.056498-443.733333-443.733334-443.733333-443.733333 199.056498-443.733333 443.733333z" fill="#6E6E96" /><path d="M567.00928 430.557867m-332.927431 0a332.927431 332.927431 0 1 0 665.854862 0 332.927431 332.927431 0 1 0-665.854862 0Z" fill="#ACD5E8" /><path d="M653.152711 276.803129m-97.848889 0a97.848889 97.848889 0 1 0 195.697778 0 97.848889 97.848889 0 1 0-195.697778 0Z" fill="#FFE4AD" /><path d="M878.760391 180.123876c102.623004-17.658311 174.175573-7.991751 191.424285 25.863964 34.679467 68.098276-131.527111 248.317724-425.483378 398.031076-218.999467 111.556836-439.41888 167.535502-536.025316 136.123733-18.181689-5.911893-30.328604-14.668231-36.113066-26.018702-19.33312-37.965369 26.036907-112.649102 118.401706-194.914987a22.755556 22.755556 0 0 0-30.273991-33.987698C47.222329 586.283236 1.520071 674.916124 32.007964 734.776889c11.459698 22.500693 32.52224 38.866489 62.595983 48.642275 108.858027 35.375787 338.229476-20.411733 570.750293-138.863502 261.465884-133.174613 506.411236-339.380907 445.376284-459.238969-27.971129-54.922809-110.846862-72.235236-239.688817-50.062222a22.769209 22.769209 0 0 0 7.718684 44.869405z" fill="#6E6E96" />
+          <svg viewBox="0 0 1024 1024" width="26" height="26" aria-hidden="true">
+            <path d="M970.474667 521.813333a14.08 14.08 0 0 0-10.24 0l-49.92 29.013334a13.653333 13.653333 0 0 0-5.12 18.346666 13.653333 13.653333 0 0 0 18.346666 4.693334l49.92-29.013334a13.226667 13.226667 0 0 0 5.12-17.92 13.226667 13.226667 0 0 0-8.106666-5.12zM754.581333 218.026667l23.466667-13.653334a29.013333 29.013333 0 0 0 10.666667-39.68 28.586667 28.586667 0 0 0-39.68-10.666666L576.234667 256a28.586667 28.586667 0 0 1-15.786667 0 29.013333 29.013333 0 0 1-17.92-13.653333 29.866667 29.866667 0 0 1 12.373333-40.96l85.333334-50.346667a390.826667 390.826667 0 0 0-526.933334 368.213333 394.24 394.24 0 0 0 37.973334 170.666667l-56.32 32.853333a20.053333 20.053333 0 0 0-7.253334 27.306667 19.626667 19.626667 0 0 0 12.373334 9.386667 20.053333 20.053333 0 0 0 14.933333-2.133334L243.434667 682.666667a32 32 0 0 1 34.56 16.213333 33.28 33.28 0 0 1-3.413334 38.826667L71.488 853.333333a29.44 29.44 0 0 0-10.666667 39.68 30.72 30.72 0 0 0 17.92 13.653334 29.866667 29.866667 0 0 0 21.76-2.986667L388.501333 738.133333a14.506667 14.506667 0 0 1 8.96 6.826667 15.36 15.36 0 0 1-5.546666 20.48l-119.466667 69.546667A389.12 389.12 0 0 0 834.794667 725.333333l-39.68 23.04a15.36 15.36 0 0 1-11.52 0 14.506667 14.506667 0 0 1-8.96-6.826666 14.933333 14.933333 0 0 1 5.546666-20.48l81.066667-47.36a395.093333 395.093333 0 0 0-106.666667-459.093334zM1016.981333 494.933333a12.373333 12.373333 0 0 0-13.226666 0 11.946667 11.946667 0 0 0-6.4 11.52 12.373333 12.373333 0 0 0 6.4 11.52 12.373333 12.373333 0 0 0 13.226666 0 13.226667 13.226667 0 0 0 6.4-11.52 12.373333 12.373333 0 0 0-6.4-11.52zM81.301333 357.12L85.568 354.133333a14.08 14.08 0 0 0 0-5.12v-2.986666A14.08 14.08 0 0 0 85.568 341.333333l-4.266667-3.413333h-27.733333v-23.466667a14.08 14.08 0 0 0 0-5.12l-2.986667-2.986666L42.901333 305.493333H37.781333a6.826667 6.826667 0 0 0-2.986666 2.986667 8.533333 8.533333 0 0 0 0 5.12v23.466667h-29.866667L0.234667 341.333333a14.08 14.08 0 0 0 0 5.12v2.986667a14.08 14.08 0 0 0 0 4.693333l2.986666 2.986667a8.533333 8.533333 0 0 0 5.12 0h24.32v22.613333a8.533333 8.533333 0 0 0 0.853334 4.266667 6.826667 6.826667 0 0 0 2.986666 2.986667H42.901333a14.08 14.08 0 0 0 5.12 0A9.813333 9.813333 0 0 0 52.714667 384a14.08 14.08 0 0 0 0-5.12v-20.906667h22.613333a8.533333 8.533333 0 0 0 5.973333-0.853333zM810.901333 165.12a27.733333 27.733333 0 0 0 28.16 0 28.16 28.16 0 1 0-28.16 0zM876.608 853.333333h-16.64v-12.8a6.826667 6.826667 0 0 0 0-3.84 3.84 3.84 0 0 0-2.56-2.56 6.826667 6.826667 0 0 0-3.84 0 5.12 5.12 0 0 0-3.84 0 5.546667 5.546667 0 0 0-2.986667 2.56 12.373333 12.373333 0 0 0 0 3.84v12.8h-16.64l-2.986666 2.986667a10.24 10.24 0 0 0 0 3.84 12.373333 12.373333 0 0 0 0 3.84l2.986666 2.986667h16.64v12.8a12.373333 12.373333 0 0 0 0 3.84 5.546667 5.546667 0 0 0 2.986667 2.56 5.12 5.12 0 0 0 3.84 0 6.826667 6.826667 0 0 0 3.84 0 3.84 3.84 0 0 0 2.56-2.56 6.826667 6.826667 0 0 0 0-3.84v-12.8h16.64s2.133333 0 2.56-2.986667a6.826667 6.826667 0 0 0 0-3.84 5.12 5.12 0 0 0 0-3.84s-1.706667-2.986667-2.56-2.986667z" fill="#8081FF" />
           </svg>
           <span class="ah-topbar-brand">ASTRA<span class="ah-topbar-accent">HUB</span></span>
           <span class="ah-topbar-page-title" v-html="activeNav === 'maintenance' ? '星链<span class=ah-kw>接入配置</span>' : activeNav === 'planetLinks' ? '<span class=ah-kw>友链</span>星球' : activeNav === 'friendManagement' ? '<span class=ah-kw>友链</span>管理' : activeNav === 'relationGraph' ? '<span class=ah-kw>关系</span>图' : '星链<span class=ah-kw>资讯</span>'"></span>
@@ -79,7 +94,10 @@ onMounted(() => {
             </div>
           </template>
           <template v-if="activeNav === 'friendManagement'">
-            <button v-for="t in [{id:'all',label:'全部'},{id:'pending',label:'待审核'},{id:'accepted',label:'已通过'},{id:'rejected',label:'已拒绝'},{id:'outbox',label:'发出的'}]" :key="t.id" class="ah-topbar-tab" :class="{ active: friendTab === t.id }" @click="friendTab = t.id as FriendTab">{{ t.label }}</button>
+            <button v-for="t in [{id:'all',label:'全部'},{id:'pending',label:'待审核'},{id:'accepted',label:'已通过'},{id:'rejected',label:'已拒绝'},{id:'outbox',label:'发出的'}]" :key="t.id" class="ah-topbar-tab ah-topbar-tab--rel" :class="{ active: friendTab === t.id }" @click="friendTab = t.id as FriendTab">
+              {{ t.label }}
+              <span v-if="t.id === 'pending' && pendingInboxCount > 0" class="ah-tab-badge">{{ pendingInboxCount > 99 ? '99+' : pendingInboxCount }}</span>
+            </button>
           </template>
           <template v-if="activeNav === 'news'">
             <div class="ah-topbar-search">
@@ -236,6 +254,7 @@ onMounted(() => {
   z-index: 20;
 }
 .ah-float-btn {
+  position: relative;
   width: 36px;
   height: 36px;
   border-radius: 12px;
@@ -250,6 +269,45 @@ onMounted(() => {
 }
 .ah-float-btn:hover { background: rgba(37,99,235,.06); color: #2563eb; }
 .ah-float-btn.active { background: rgba(37,99,235,.1); color: #2563eb; box-shadow: 0 0 12px rgba(37,99,235,.1); }
+
+/* 待审核红点角标：友链管理导航按钮右上角 */
+.ah-nav-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 0 0 2px #fff;
+  pointer-events: none;
+}
+/* 待审核 tab 内联红点角标 */
+.ah-topbar-tab--rel { position: relative; gap: 6px; }
+.ah-tab-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
 
 /* 主内容 */
 .ah-content {

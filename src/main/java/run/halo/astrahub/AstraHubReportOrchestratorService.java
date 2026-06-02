@@ -33,6 +33,9 @@ public class AstraHubReportOrchestratorService {
     private static final Duration DEFAULT_INTERVAL = Duration.ofHours(6);
     private static final int DEFAULT_INTERVAL_MINUTES = (int) DEFAULT_INTERVAL.toMinutes();
     private static final Duration MIN_RETRY_BACKOFF = Duration.ofSeconds(5);
+    // 单次推送的硬上限：底层是阻塞 HttpClient（连接 10s + 请求 15s），这里给整条链兜底，
+    // 任何卡死到点都会被强制终止，触发资源释放，绝不依赖重启来恢复。
+    private static final Duration PUSH_HARD_TIMEOUT = Duration.ofSeconds(60);
 
     private final ReactiveSettingFetcher settingFetcher;
     private final AstraHubGraphTransformService graphTransformService;
@@ -40,7 +43,10 @@ public class AstraHubReportOrchestratorService {
 
     private final Scheduler reportScheduler = Schedulers.newSingle("astrahub-report-loop");
     private final AtomicBoolean schedulerActive = new AtomicBoolean(false);
-    private final AtomicBoolean pushing = new AtomicBoolean(false);
+    // 当前正在执行的推送任务句柄。它的"非空且未 disposed"直接等价于"正在推送"，
+    // 不再用独立布尔标志（旧实现里 AtomicBoolean pushing 会因异常路径或未订阅而永久泄漏，
+    // 导致此后所有推送 429 且只能重启）。句柄是自校正的：跑完/取消/为空都精确表示空闲。
+    private final AtomicReference<Disposable> currentPushTask = new AtomicReference<>();
     private final AtomicBoolean linkEstablished = new AtomicBoolean(false);
     private final AtomicReference<Disposable> currentLoopTask = new AtomicReference<>();
     private final AtomicReference<String> nextRunAt = new AtomicReference<>("");
@@ -143,8 +149,16 @@ public class AstraHubReportOrchestratorService {
     }
 
     private Mono<Duration> runAutoCycle() {
-        return readSyncPolicy().flatMap(policy ->
-            runPush("auto", null, policy).map(result -> {
+        return readSyncPolicy().flatMap(policy -> {
+            // 自动推送是最低优先级：若已有推送在跑（手动或上一轮自动），直接跳过本轮，
+            // 绝不取消别人、也绝不抢占。等下个周期再来。
+            Disposable active = currentPushTask.get();
+            if (active != null && !active.isDisposed()) {
+                publish(HubPhase.BUSY, "auto", false, true, 200,
+                    "another push in progress, auto cycle skipped", "", nextRunAt.get());
+                return Mono.just(policy.interval());
+            }
+            return runPush("auto", null, policy).map(result -> {
                 if (result.success()) {
                     return policy.interval();
                 }
@@ -152,8 +166,8 @@ public class AstraHubReportOrchestratorService {
                     return policy.retryBackoff();
                 }
                 return policy.interval();
-            })
-        );
+            });
+        });
     }
 
     private Mono<AstraHubPushService.PushResult> runPush(String trigger) {
@@ -164,14 +178,66 @@ public class AstraHubReportOrchestratorService {
         return runPush(trigger, request, null);
     }
 
+    // 推送统一入口。
+    //
+    // 优先级与并发语义（彻底根治 429 卡死的核心）：
+    //   - 手动（manual）：最高优先级，永不返回 429。进入时先取消当前正在跑的任何推送，
+    //     再立即接管。用户点一次就立刻推最新数据。
+    //   - 自动（auto）：runAutoCycle 已在外层判定"有活任务就跳过"，到这里默认是空闲的；
+    //     即便竞态下被手动抢占，executePush 的 using 也保证资源正确释放。
+    //
+    // 资源安全：用 Mono.using 把"占位/释放"绑死在订阅生命周期内，无论正常完成、出错、
+    //   超时还是被取消，释放逻辑都成对执行；再叠加 PUSH_HARD_TIMEOUT 兜底，任何卡死都自愈。
     private Mono<AstraHubPushService.PushResult> runPush(String trigger, ServerRequest request, SyncPolicy policy) {
-        if (!pushing.compareAndSet(false, true)) {
-            AstraHubPushService.PushResult busy =
-                AstraHubPushService.PushResult.failed(429, "push already in progress");
-            publish(HubPhase.BUSY, trigger, false, false, busy.status(), busy.message(), busy.pushedAt(), nextRunAt.get());
-            return Mono.just(busy);
-        }
+        boolean manual = "manual".equalsIgnoreCase(trigger);
+        return Mono.defer(() -> {
+            if (manual) {
+                // 手动抢占：取消正在跑的推送（自动或上一次手动），让位给本次。
+                Disposable previous = currentPushTask.getAndSet(null);
+                if (previous != null && !previous.isDisposed()) {
+                    previous.dispose();
+                }
+            }
+            return executePush(trigger, request, policy);
+        });
+    }
 
+    private Mono<AstraHubPushService.PushResult> executePush(
+        String trigger, ServerRequest request, SyncPolicy policy) {
+        // slot 既是"占位令牌"也是可被外部 dispose 的句柄：
+        //   - 资源获取期：把它注册到 currentPushTask，对外表示"正在推送"
+        //   - 资源释放期：仅当 currentPushTask 仍指向自己时清空（避免误清后来的手动任务）
+        Sinks.Empty<Void> cancelSignal = Sinks.empty();
+        return Mono.usingWhen(
+            Mono.fromSupplier(() -> {
+                Disposable token = cancelSignal::tryEmitEmpty;
+                currentPushTask.set(token);
+                return token;
+            }),
+            token -> buildAndPush(trigger, request, policy)
+                .timeout(PUSH_HARD_TIMEOUT,
+                    Mono.fromSupplier(() -> {
+                        AstraHubPushService.PushResult timeout =
+                            AstraHubPushService.PushResult.failed(504, "push timed out");
+                        publish(HubPhase.ERROR, trigger, false, false, timeout.status(),
+                            timeout.message(), timeout.pushedAt(), nextRunAt.get());
+                        return timeout;
+                    }))
+                // 被手动抢占（token 触发 cancelSignal）时，取消当前推送并返回让位结果。
+                .takeUntilOther(cancelSignal.asMono())
+                .switchIfEmpty(Mono.fromSupplier(() -> {
+                    AstraHubPushService.PushResult superseded =
+                        AstraHubPushService.PushResult.failed(409, "push superseded by a newer push");
+                    return superseded;
+                })),
+            token -> Mono.fromRunnable(() -> currentPushTask.compareAndSet(token, null)),
+            (token, error) -> Mono.fromRunnable(() -> currentPushTask.compareAndSet(token, null)),
+            token -> Mono.fromRunnable(() -> currentPushTask.compareAndSet(token, null))
+        );
+    }
+
+    private Mono<AstraHubPushService.PushResult> buildAndPush(
+        String trigger, ServerRequest request, SyncPolicy policy) {
         String incrementalSince = resolveIncrementalSince(trigger, request, policy);
         boolean incremental = !incrementalSince.isBlank();
         String syncReason = resolveSyncReason(trigger, request);
@@ -217,8 +283,7 @@ public class AstraHubReportOrchestratorService {
                 result.message(),
                 result.pushedAt(),
                 nextRunAt.get()
-            ))
-            .doFinally(signalType -> pushing.set(false));
+            ));
     }
 
     private Mono<SyncPolicy> readSyncPolicy() {

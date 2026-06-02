@@ -27,28 +27,6 @@ public class AstraHubPlanetLinksRouter implements CustomEndpoint {
     public RouterFunction<ServerResponse> endpoint() {
         final var tag = "api.plugin.halo.run/v1alpha1/AstraHub";
         return SpringdocRouteBuilder.route()
-            .GET("astrahub/planet-links/relations", request -> planetLinksService.fetchRelations()
-                    .flatMap(result -> {
-                        if (result.success()) {
-                            return ServerResponse.ok()
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .bodyValue(result.body());
-                        }
-                        int status = result.status() >= 400 ? result.status() : 400;
-                        return ServerResponse.status(status)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .bodyValue("{\"message\":\"" + escapeJson(result.message()) + "\"}");
-                    })
-                    .onErrorResume(error -> {
-                        log.error("[AstraHub] load planet links relations error", error);
-                        return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .bodyValue("{\"message\":\"internal error\"}");
-                    }),
-                builder -> builder.operationId("ListAstraHubPlanetLinksRelations")
-                    .tag(tag)
-                    .description("Load planet links priority relation group (mutual / one_way_out / one_way_in) from AstraHub Hub")
-                    .response(responseBuilder().description("Planet links relations")))
             .GET("astrahub/planet-links", request -> planetLinksService.fetch(buildQuery(request))
                     .flatMap(result -> {
                         if (result.success()) {

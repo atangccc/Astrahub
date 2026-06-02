@@ -119,6 +119,9 @@ export interface PlanetLinkItem {
   updatedAt: string;
   sourceSites: PlanetLinkSourceSite[];
   relationKind?: string;
+  // relationStatus 是服务端算好的权威关系展示状态（self/mutual/following/
+  // follower/invite_sent/invitable/none），前端只做枚举→文案映射，不自行推断。
+  relationStatus?: string;
   targetSiteId?: string;
   targetRegistered?: boolean;
   targetSupportsInvitation?: boolean;
@@ -238,56 +241,6 @@ export interface AstraHubSiteLookupResult {
   supportsInvitation?: boolean;
   invitationState?: string;
   invitationMessage?: string;
-}
-
-export interface AstraHubSiteRelationIdentity {
-  queryUrl?: string;
-  normalizedUrl?: string;
-  normalizedRootUrl?: string;
-  registered: boolean;
-  registeredByPlugin?: boolean;
-  credentialReady?: boolean;
-  siteId?: string;
-  siteName?: string;
-  siteUrl?: string;
-  description?: string;
-  rssUrl?: string;
-  avatarUrl?: string;
-  contactEmail?: string;
-  nodeName?: string;
-  category?: string;
-  nodeAvatar?: string;
-  siteStatus?: string;
-  supportsInvitation?: boolean;
-  invitationState?: string;
-  invitationMessage?: string;
-  matchedBy?: string;
-  lookupError?: string;
-}
-
-export interface AstraHubSiteRelationSide {
-  known: boolean;
-  added: boolean;
-  snapshotAt?: string;
-  updatedAt?: string;
-  reason?: string;
-}
-
-export interface AstraHubSiteRelationItem {
-  observerSiteId: string;
-  observerSiteUrl?: string;
-  targetUrl: string;
-  targetIdentity: AstraHubSiteRelationIdentity;
-  mine: AstraHubSiteRelationSide;
-  theirs: AstraHubSiteRelationSide;
-  relationKind: string;
-}
-
-export interface AstraHubSiteRelationBatchResponse {
-  success: boolean;
-  status: number;
-  message: string;
-  items: AstraHubSiteRelationItem[];
 }
 
 export interface AstraHubRealtimeTokenResult {
