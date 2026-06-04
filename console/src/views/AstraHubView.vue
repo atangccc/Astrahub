@@ -1,8 +1,12 @@
 <script lang="ts" setup>
 import { onMounted, ref } from "vue";
-import { VLoading } from "@halo-dev/components";
 import { useConfigMap } from "../composables/useConfigMap";
-import { fetchFriendInvitations } from "../composables/useFriendInvitations";
+import {
+  fetchFriendInvitations,
+  syncFriendInvitationInbox
+} from "../composables/useFriendInvitations";
+import { useFriendInvitationRealtime } from "../composables/useFriendInvitationRealtime";
+import { shouldRefreshPendingInboxCountAfterRealtimeEvent } from "../composables/useFriendInvitationPendingRefresh";
 
 import ConnectionSettings from "../components/settings/ConnectionSettings.vue";
 import FriendInvitationManager from "../components/settings/FriendInvitationManager.vue";
@@ -31,6 +35,7 @@ function refreshRelationGraph() {
 // 拉取收件箱 pending 数量。失败静默（不打扰用户），角标仅在 >0 时显示。
 async function refreshPendingInboxCount() {
   try {
+    await syncFriendInvitationInbox().catch(() => undefined);
     const resp = await fetchFriendInvitations("inbox", "pending");
     pendingInboxCount.value = Array.isArray(resp.items) ? resp.items.length : 0;
   } catch {
@@ -38,9 +43,15 @@ async function refreshPendingInboxCount() {
   }
 }
 
-onMounted(() => {
-  fetchSettings();
-  refreshPendingInboxCount();
+useFriendInvitationRealtime(settings, (event) => {
+  if (shouldRefreshPendingInboxCountAfterRealtimeEvent(event.type)) {
+    void refreshPendingInboxCount();
+  }
+});
+
+onMounted(async () => {
+  await fetchSettings();
+  await refreshPendingInboxCount();
 });
 </script>
 
@@ -133,7 +144,12 @@ onMounted(() => {
 
         <ConnectionSettings v-if="!loading && activeNav === 'maintenance'" :settings="settings" :saving="saving" :persist-settings="saveSettings" />
         <PlanetLinksPanel v-if="!loading && activeNav === 'planetLinks'" :settings="settings" :active-filter="planetFilter" :search-query="planetSearch" :persist-settings="saveSettings" />
-        <FriendInvitationManager v-if="!loading && activeNav === 'friendManagement'" :settings="settings" :active-tab="friendTab" />
+        <FriendInvitationManager
+          v-if="!loading && activeNav === 'friendManagement'"
+          :settings="settings"
+          :active-tab="friendTab"
+          @pending-inbox-count-change="refreshPendingInboxCount"
+        />
         <NewsHubPanel v-if="!loading && activeNav === 'news'" :settings="settings" :search-query="newsSearch" :persist-settings="saveSettings" />
         <RelationGraphPanel
           v-if="!loading && activeNav === 'relationGraph'"

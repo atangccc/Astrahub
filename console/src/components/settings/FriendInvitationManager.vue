@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Toast, VLoading } from "@halo-dev/components";
+import { Toast } from "@halo-dev/components";
 import EmptyState from "../common/EmptyState.vue";
 import type { AstraHubSettings, FriendInvitationItem, LinkGroupOption } from "../../types";
 import {
@@ -16,12 +16,21 @@ import {
   reviewFriendInvitation
 } from "../../composables/useFriendInvitations";
 import { useFriendInvitationRealtime, type HubRealtimeEvent } from "../../composables/useFriendInvitationRealtime";
+import {
+  shouldRefreshPendingInboxCountAfterManagerAction,
+  shouldRefreshPendingInboxCountAfterRealtimeEvent,
+  type PendingInboxRefreshCause
+} from "../../composables/useFriendInvitationPendingRefresh";
 
 type FriendInvitationTab = "all" | "pending" | "accepted" | "rejected" | "outbox";
 
 const props = defineProps<{
   settings: AstraHubSettings;
   activeTab: FriendInvitationTab;
+}>();
+
+const emit = defineEmits<{
+  (event: "pending-inbox-count-change"): void;
 }>();
 
 const settingsRef = computed(() => props.settings);
@@ -251,6 +260,12 @@ function upsertLocalItem(nextItem: FriendInvitationItem) {
   total.value += 1;
 }
 
+function notifyPendingInboxCountChanged(cause: PendingInboxRefreshCause) {
+  if (shouldRefreshPendingInboxCountAfterManagerAction(cause)) {
+    emit("pending-inbox-count-change");
+  }
+}
+
 function statusText(item: FriendInvitationItem) {
   const direction = directionOf(item);
   const tab = activeTab.value;
@@ -398,6 +413,9 @@ function applyRealtimeInvitationEvent(event: HubRealtimeEvent<FriendInvitationIt
   if (exists) {
     removeLocalItem(invitation.inviteId);
   }
+  if (shouldRefreshPendingInboxCountAfterRealtimeEvent(event.type)) {
+    emit("pending-inbox-count-change");
+  }
 }
 
 async function reload() {
@@ -457,6 +475,7 @@ async function reload() {
         void reconcileAcceptedOutboxItems(tagged);
       }
     }
+    notifyPendingInboxCountChanged("sync");
   } catch (e) {
     error.value = e instanceof Error ? e.message : "读取友链邀请失败";
     items.value = [];
@@ -546,6 +565,7 @@ async function removeInvitation(item: FriendInvitationItem) {
       await deleteFriendInvitation(item.inviteId);
       Toast.success("友链记录已删除");
       removeLocalItem(item.inviteId);
+      notifyPendingInboxCountChanged("delete");
     } catch (e) {
       Toast.error(e instanceof Error ? e.message : "删除友链记录失败");
     } finally {
@@ -566,6 +586,7 @@ async function cancelInvitation(item: FriendInvitationItem) {
         replaceLocalItem(updated);
       }
       Toast.success("友链邀请已撤回");
+      notifyPendingInboxCountChanged("cancel");
     } catch (e) {
       Toast.error(e instanceof Error ? e.message : "撤回友链邀请失败");
     } finally {
@@ -659,6 +680,7 @@ async function submitReview() {
     closeReviewDialog();
     Toast.success(reviewMode.value === "approve" ? "友链邀请已通过" : "友链邀请已拒绝");
     await reload();
+    notifyPendingInboxCountChanged("review");
   } catch (e) {
     Toast.error(e instanceof Error ? e.message : "审核友链邀请失败");
   } finally {
