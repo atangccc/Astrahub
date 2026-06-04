@@ -135,6 +135,21 @@ function peerSite(item: FriendInvitationItem) {
   return directionOf(item) === "outbox" ? item.toSite : item.fromSite;
 }
 
+function externalLinkHref(value?: string) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const normalized = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const parsed = new URL(normalized);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
 function directionOf(item: FriendInvitationItem): "inbox" | "outbox" {
   return (item as FriendInvitationItem & { __direction: "inbox" | "outbox" }).__direction;
 }
@@ -781,7 +796,17 @@ watch(
 
               <div class="name-cell">
                 <div class="site-name">{{ peerSite(item).siteName || "-" }}</div>
-                <div class="site-url">{{ peerSite(item).siteUrl || "-" }}</div>
+                <a
+                  v-if="externalLinkHref(peerSite(item).siteUrl)"
+                  class="site-url external-link"
+                  :href="externalLinkHref(peerSite(item).siteUrl)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="peerSite(item).siteUrl"
+                >
+                  {{ peerSite(item).siteUrl }}
+                </a>
+                <div v-else class="site-url">{{ peerSite(item).siteUrl || "-" }}</div>
               </div>
 
               <div class="desc-cell">
@@ -798,7 +823,17 @@ watch(
               </div>
 
               <div class="rss-cell">
-                <div class="contact-rss">{{ peerSite(item).rssUrl || "-" }}</div>
+                <a
+                  v-if="externalLinkHref(peerSite(item).rssUrl)"
+                  class="contact-rss external-link"
+                  :href="externalLinkHref(peerSite(item).rssUrl)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="peerSite(item).rssUrl"
+                >
+                  {{ peerSite(item).rssUrl }}
+                </a>
+                <div v-else class="contact-rss">{{ peerSite(item).rssUrl || "-" }}</div>
               </div>
 
               <div class="message-cell">
@@ -985,6 +1020,9 @@ watch(
 .name-cell,.rss-cell,.message-cell{min-width:0}
 .site-name{font-size:13px;font-weight:600;color:#0f172a;line-height:1.3}
 .site-url,.contact-rss{color:#94a3b8;word-break:break-all;font-size:12px;line-height:1.45}
+.external-link{display:inline-block;text-decoration:none;transition:color .15s ease,text-decoration-color .15s ease;text-decoration-line:underline;text-decoration-color:transparent;text-underline-offset:3px}
+.external-link:hover,.external-link:focus-visible{color:#4f46e5;text-decoration-color:currentColor}
+.external-link:focus-visible{outline:2px solid rgba(79,70,229,.35);outline-offset:2px;border-radius:4px}
 .rss-cell,.message-cell{word-break:break-word}
 .desc-cell{display:flex;align-items:center;justify-content:center;overflow:visible}
 .desc-icon-trigger{position:relative;display:inline-flex;align-items:center;justify-content:center;color:#94a3b8;cursor:pointer;transition:color .15s}
