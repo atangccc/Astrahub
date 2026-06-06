@@ -1,8 +1,17 @@
 <script lang="ts" setup>
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { VLoading } from "@halo-dev/components";
 import { useConfigMap } from "../composables/useConfigMap";
-import { fetchFriendInvitations } from "../composables/useFriendInvitations";
+import {
+  ackFriendInvitation,
+  fetchFriendInvitations,
+  reconcileFriendInvitation
+} from "../composables/useFriendInvitations";
+import {
+  useFriendInvitationRealtime,
+  type HubRealtimeEvent
+} from "../composables/useFriendInvitationRealtime";
+import type { FriendInvitationItem } from "../types";
 
 import ConnectionSettings from "../components/settings/ConnectionSettings.vue";
 import FriendInvitationManager from "../components/settings/FriendInvitationManager.vue";
@@ -20,23 +29,129 @@ const planetFilter = ref<PlanetFilter>("all");
 const planetSearch = ref("");
 const newsSearch = ref("");
 const relationRefreshSignal = ref(0);
-// 收件箱待审核数量：用于「友链管理」导航 + 「待审核」tab 的红色提醒角标。
-const pendingInboxCount = ref(0);
+// 收件箱待审核 inviteId 集合：红点 = 集合大小。用 Set 去重保证幂等，
+// 本地审批/拒绝与 WS 回声携带同一 inviteId 时不会重复增减。
+const pendingInboxIds = ref<Set<string>>(new Set());
+const pendingInboxCount = computed(() => pendingInboxIds.value.size);
+// 父组件持有 WS，子组件只在挂载时通过此 prop 同步消费，避免重复连接 + 解决子组件未挂载时红点不变化的问题。
+// 事件类型涵盖所有 friend_invitation_* + site_relation_updated，data 形态由消费方按 type 分支解析。
+const lastRealtimeEvent = ref<HubRealtimeEvent<unknown> | null>(null);
 const { loading, saving, settings, fetchSettings, saveSettings } = useConfigMap();
 
 function refreshRelationGraph() {
   relationRefreshSignal.value += 1;
 }
 
-// 拉取收件箱 pending 数量。失败静默（不打扰用户），角标仅在 >0 时显示。
+// 初次加载（或站点切换）时全量拉取一次收件箱 pending，重建集合。
+// 失败静默（不打扰用户），角标仅在 >0 时显示。
 async function refreshPendingInboxCount() {
   try {
     const resp = await fetchFriendInvitations("inbox", "pending");
-    pendingInboxCount.value = Array.isArray(resp.items) ? resp.items.length : 0;
+    const ids = Array.isArray(resp.items)
+      ? resp.items.map((item) => String(item.inviteId || "").trim()).filter(Boolean)
+      : [];
+    pendingInboxIds.value = new Set(ids);
   } catch {
-    pendingInboxCount.value = 0;
+    pendingInboxIds.value = new Set();
   }
 }
+
+// 按 inviteId 增量维护红点集合，Set 天然去重，重复 add/remove 幂等。
+// 调用方：1) 父组件 WS 回调（任何页面都会触发）；2) 子组件本地审批/拒绝后立即上报，让红点立刻消失。
+function addPendingInbox(inviteId: string) {
+  const id = String(inviteId || "").trim();
+  if (!id || pendingInboxIds.value.has(id)) {
+    return;
+  }
+  const next = new Set(pendingInboxIds.value);
+  next.add(id);
+  pendingInboxIds.value = next;
+}
+
+function removePendingInbox(inviteId: string) {
+  const id = String(inviteId || "").trim();
+  if (!id || !pendingInboxIds.value.has(id)) {
+    return;
+  }
+  const next = new Set(pendingInboxIds.value);
+  next.delete(id);
+  pendingInboxIds.value = next;
+}
+
+// 邀请方（fromSite）侧：审核通过后立即把对方加进本地 Halo 友链。
+// 这是一个无 UI 的后台动作，让博客前台 /links 页面无需用户进过「友链管理」tab 也能立刻看到对方。
+// reconciledOutboxIds 仅 push（不主动清除），同一 inviteId 在本次会话里只 reconcile 一次，
+// 避免 WS 抖动 / 事件重放重复打 reconcile + ack。Hub 端 reconcile 自带 duplicate 保护，
+// 即便偶发重放最坏也是浪费一次 HTTP，不会写脏。
+const reconciledOutboxIds = new Set<string>();
+
+async function autoReconcileAcceptedOutboxInvitation(invitation: FriendInvitationItem) {
+  const inviteId = String(invitation.inviteId || "").trim();
+  if (!inviteId || reconciledOutboxIds.has(inviteId)) {
+    return;
+  }
+  reconciledOutboxIds.add(inviteId);
+  const mySiteId = String(settings.value.credentials.siteId || "").trim();
+  try {
+    await reconcileFriendInvitation(invitation, mySiteId);
+    await ackFriendInvitation(inviteId, "");
+  } catch (error) {
+    // 失败则把 ack 的 lastError 写回 hub，让用户在「发出的」tab 能看见原因；
+    // 同时把 inviteId 从去重集合里拿掉，下次 WS 事件（如手动重试）还能再尝试。
+    const message = error instanceof Error ? error.message : "本地建链失败";
+    try {
+      await ackFriendInvitation(inviteId, message);
+    } catch {
+      // ignore：fallback ack 失败也只是日志层面的损失，不影响主流程
+    }
+    reconciledOutboxIds.delete(inviteId);
+  }
+}
+
+// 父组件订阅 WS 后，根据事件类型 + 收件箱状态维护红点集合：
+// - 仅处理收件箱方向（toSite = 当前站点）；发件箱事件与本站待审数无关。
+// - created 且仍为 pending → add；其余（reviewed / cancelled / acked / deleted，或非 pending 状态）→ remove。
+// site_relation_updated 与红点无关，仅用于透传给子组件刷新友链卡片。
+// 同时把最新事件透传给子组件，子组件在挂载时按现有逻辑刷新列表行（不重复开 WS）。
+useFriendInvitationRealtime(settings, (event) => {
+  lastRealtimeEvent.value = event;
+  if (event.type === "site_relation_updated") {
+    return;
+  }
+  const invitation = event.data as FriendInvitationItem | undefined;
+  if (!invitation) {
+    return;
+  }
+  const myId = String(settings.value.credentials.siteId || "").trim();
+  if (!myId) {
+    return;
+  }
+  const fromMe = String(invitation.fromSite?.siteId || "").trim() === myId;
+  const toMe = String(invitation.toSite?.siteId || "").trim() === myId;
+  // 邀请方收到 reviewed=accepted：无论用户当前在哪个 tab，立即在本地 Halo 把对方写进友链。
+  // 不依赖用户切到「友链管理」tab 触发 reconcileAcceptedOutboxItems。
+  if (
+    fromMe &&
+    event.type === "friend_invitation_reviewed" &&
+    invitation.status === "accepted"
+  ) {
+    void autoReconcileAcceptedOutboxInvitation(invitation);
+  }
+  if (!toMe) {
+    return;
+  }
+  const inviteId = String(invitation.inviteId || "").trim();
+  if (!inviteId) {
+    return;
+  }
+  const stillPending =
+    event.type !== "friend_invitation_deleted" && invitation.status === "pending";
+  if (stillPending) {
+    addPendingInbox(inviteId);
+  } else {
+    removePendingInbox(inviteId);
+  }
+});
 
 onMounted(() => {
   fetchSettings();
@@ -132,8 +247,21 @@ onMounted(() => {
         </div>
 
         <ConnectionSettings v-if="!loading && activeNav === 'maintenance'" :settings="settings" :saving="saving" :persist-settings="saveSettings" />
-        <PlanetLinksPanel v-if="!loading && activeNav === 'planetLinks'" :settings="settings" :active-filter="planetFilter" :search-query="planetSearch" :persist-settings="saveSettings" />
-        <FriendInvitationManager v-if="!loading && activeNav === 'friendManagement'" :settings="settings" :active-tab="friendTab" />
+        <PlanetLinksPanel
+          v-if="!loading && activeNav === 'planetLinks'"
+          :settings="settings"
+          :active-filter="planetFilter"
+          :search-query="planetSearch"
+          :persist-settings="saveSettings"
+          :realtime-event="lastRealtimeEvent"
+        />
+        <FriendInvitationManager
+          v-if="!loading && activeNav === 'friendManagement'"
+          :settings="settings"
+          :active-tab="friendTab"
+          :realtime-event="lastRealtimeEvent"
+          @pending-inbox-remove="removePendingInbox"
+        />
         <NewsHubPanel v-if="!loading && activeNav === 'news'" :settings="settings" :search-query="newsSearch" :persist-settings="saveSettings" />
         <RelationGraphPanel
           v-if="!loading && activeNav === 'relationGraph'"

@@ -50,6 +50,67 @@ export async function deleteFriendInvitation(inviteId: string) {
   }
 }
 
+export interface RemoveFriendRelationResult {
+  success: boolean;
+  status: number;
+  message: string;
+  removed: boolean;
+  peerSiteId: string;
+  peerSiteUrl: string;
+  localLinkDeleted: number;
+  localLinkMessage: string;
+}
+
+/**
+ * 主动解除与对端站点的友链关系：
+ *   1) Hub 删除 X→Y 边并向对端发邮件；
+ *   2) 本插件随后删除本地 Halo Link CR（按 peerUrl 匹配）。
+ * peerSiteId 必须是 Hub 注册的对端 siteId（已加友链 / 我已关注（对方接入）卡片才有此字段）。
+ * reason 为可选解除原因，会进对方收件邮件正文。
+ */
+export async function removeFriendRelation(
+  peerSiteId: string,
+  reason = ""
+): Promise<RemoveFriendRelationResult> {
+  const trimmedReason = String(reason || "").trim();
+  const init: RequestInit = {
+    method: "POST",
+    headers: {
+      Accept: "application/json"
+    }
+  };
+  if (trimmedReason) {
+    init.headers = {
+      ...(init.headers as Record<string, string>),
+      "Content-Type": "application/json"
+    };
+    init.body = JSON.stringify({ reason: trimmedReason });
+  }
+  const response = await fetch(
+    `/apis/api.plugin.halo.run/v1alpha1/astrahub/friend-relations/${encodeURIComponent(peerSiteId)}/remove`,
+    init
+  );
+
+  const payload = (await parseJson(response)) as Partial<RemoveFriendRelationResult> & {
+    message?: string;
+  };
+
+  if (!response.ok || !payload.success) {
+    throw new Error(payload.message || `解除友链关系失败（${response.status}）`);
+  }
+
+  return {
+    success: Boolean(payload.success),
+    status: Number(payload.status || response.status),
+    message: String(payload.message || "ok"),
+    removed: Boolean(payload.removed),
+    peerSiteId: String(payload.peerSiteId || peerSiteId),
+    peerSiteUrl: String(payload.peerSiteUrl || ""),
+    localLinkDeleted: Number(payload.localLinkDeleted || 0),
+    localLinkMessage: String(payload.localLinkMessage || "")
+  };
+}
+
 export async function cancelFriendInvitation(inviteId: string) {
   const response = await fetch(`/apis/api.plugin.halo.run/v1alpha1/astrahub/friend-invitations/${encodeURIComponent(inviteId)}/cancel`, {
     method: "POST",

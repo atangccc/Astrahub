@@ -38,13 +38,14 @@ public class AstraHubPushService {
         .build();
 
     private final ReactiveSettingFetcher settingFetcher;
+    private final AstraHubCredentialReader credentialReader;
 
     public Mono<PushResult> pushGraph(AstraHubGraphTransformService.GraphPayload payload) {
         return pushPayload(payload, GRAPH_PUSH_PATH);
     }
 
     private Mono<PushResult> pushPayload(Object payload, String pushPath) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> pushBlocking(
                     payload,
                     pushPath,

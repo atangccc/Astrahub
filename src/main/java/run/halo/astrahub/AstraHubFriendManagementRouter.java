@@ -105,6 +105,11 @@ public class AstraHubFriendManagementRouter implements CustomEndpoint {
                     .tag(tag)
                     .description("Delete local invitation cache, and cancel remote pending outbox invitation first when needed")
                     .response(responseBuilder().description("Delete result")))
+            .POST("astrahub/friend-relations/{peerSiteId}/remove", this::removeFriendRelation,
+                builder -> builder.operationId("RemoveAstraHubFriendRelation")
+                    .tag(tag)
+                    .description("Remove the existing friend relation with peer site: deletes hub edge, sends notification mail, then removes local Halo Link CR")
+                    .response(responseBuilder().description("Remove relation result")))
             .build();
     }
 
@@ -383,6 +388,73 @@ public class AstraHubFriendManagementRouter implements CustomEndpoint {
             return Mono.error(new IllegalStateException("local invitation metadata.name is empty"));
         }
         return friendManagementService.deleteLocalInvitation(name);
+    }
+
+    /**
+     * removeFriendRelation 处理 POST /astrahub/friend-relations/{peerSiteId}/remove。
+     *
+     * 先调 Hub 的 /v1/friend-relations/{peerSiteId}/remove 让 Hub 删边 + 发邮件 + 广播 WS；
+     * Hub 成功后再删本地 Halo Link CR（按 peerSiteUrl 匹配）。
+     *
+     * 顺序选择"先 Hub 后本地"是因为：
+     *   - 邮件 + Hub 关系删除是用户的核心意图，必须由 Hub 权威完成；
+     *   - 本地 Link 删除失败时仍可由 WS 回放或用户手动重试补救；
+     *   - 反过来如果先删本地再调 Hub，Hub 调用失败会出现"博客上没了但 Hub 还在"的撕裂状态，
+     *     下次插件 push 友链快照时 Hub 上这条边还会被保留（受 invitation 受保护 kind 影响），
+     *     会造成长期不一致。
+     */
+    private Mono<ServerResponse> removeFriendRelation(ServerRequest request) {
+        String peerSiteId = request.pathVariable("peerSiteId");
+        return request.bodyToMono(RemoveFriendRelationRequest.class)
+            .defaultIfEmpty(new RemoveFriendRelationRequest(""))
+            .flatMap(body -> friendManagementService.removeFriendRelation(
+                new AstraHubFriendManagementService.RemoveFriendRelationCommand(
+                    peerSiteId,
+                    body.reason()
+                )
+            ))
+            .flatMap(result -> {
+                if (!result.success()) {
+                    int statusCode = result.status() >= 400 ? result.status() : 400;
+                    return ServerResponse.status(statusCode)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(Map.of(
+                            "success", false,
+                            "status", result.status(),
+                            "message", result.message()
+                        ));
+                }
+                String peerUrl = trim(result.peerSiteUrl());
+                Mono<AstraHubFriendLinkReconcileService.LocalLinkDeleteResult> localCleanup =
+                    peerUrl.isEmpty()
+                        ? Mono.just(AstraHubFriendLinkReconcileService.LocalLinkDeleteResult.notFound(""))
+                        : friendLinkReconcileService.deleteLocalLinkByPeerUrl(peerUrl);
+                return localCleanup
+                    .map(localResult -> Map.<String, Object>of(
+                        "success", true,
+                        "status", 200,
+                        "message", "ok",
+                        "removed", result.removed(),
+                        "peerSiteId", trim(result.peerSiteId()),
+                        "peerSiteUrl", peerUrl,
+                        "localLinkDeleted", localResult.deleted(),
+                        "localLinkMessage", trim(localResult.message())
+                    ))
+                    .flatMap(payload -> ServerResponse.ok()
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(payload));
+            })
+            .onErrorResume(error -> {
+                log.error("[AstraHub] remove friend relation error", error);
+                return ServerResponse.status(500)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(Map.of("success", false, "status", 500, "message", "internal error: " + error.getMessage()));
+            });
+    }
+
+    public record RemoveFriendRelationRequest(
+        String reason
+    ) {
     }
 
     private Mono<ServerResponse> listLinkGroups(ServerRequest request) {

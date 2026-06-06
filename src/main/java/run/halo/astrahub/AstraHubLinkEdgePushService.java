@@ -38,6 +38,7 @@ public class AstraHubLinkEdgePushService {
 
     private final ReactiveSettingFetcher settingFetcher;
     private final AstraHubLinkEdgeExportService exportService;
+    private final AstraHubCredentialReader credentialReader;
 
     public Mono<PushResult> push() {
         return exportService.export()
@@ -54,7 +55,7 @@ public class AstraHubLinkEdgePushService {
     }
 
     private Mono<PushResult> pushPayload(AstraHubLinkEdgeExportService.LinkEdgesPayload payload) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> pushBlocking(payload, tuple.getT1(), tuple.getT2()))
                 .subscribeOn(Schedulers.boundedElastic()));
     }

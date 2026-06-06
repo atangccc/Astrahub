@@ -8,10 +8,14 @@ import { usePlanetLinksLocal } from "../../composables/usePlanetLinksLocal";
 import { HERO_MASCOT_DATA_URI } from "../../data/heroMascot";
 import {
   createFriendInvitation,
-  fetchFriendInvitationLinkGroups
+  fetchFriendInvitationLinkGroups,
+  removeFriendRelation
 } from "../../composables/useFriendInvitations";
 import { lookupAstraHubSiteByUrl } from "../../composables/useAstraHubSiteLookup";
-import { useFriendInvitationRealtime, type HubRealtimeEvent } from "../../composables/useFriendInvitationRealtime";
+import type {
+  HubRealtimeEvent,
+  HubSiteRelationUpdatedPayload
+} from "../../composables/useFriendInvitationRealtime";
 import type { FriendInvitationItem, LinkGroupOption } from "../../types";
 
 const props = defineProps<{
@@ -19,9 +23,13 @@ const props = defineProps<{
   activeFilter?: "all" | "mutual" | "following" | "pendingBack" | "favorites";
   searchQuery?: string;
   persistSettings?: (options?: SaveSettingsOptions) => Promise<boolean>;
+  // 父组件 AstraHubView 持有 WS 单例，把事件通过 prop 透传过来。
+  // 本组件按事件类型就地翻面卡片状态，避免重复连 WS，也不依赖 Hub 物化表 5s tick 的延迟。
+  realtimeEvent?: HubRealtimeEvent<unknown> | null;
 }>();
 
-const settingsRef = ref(props.settings);
+// 浮层最多渲染的条目数，超出用"还有 N 个…"省略，避免站点/标签上千条时全量渲染卡顿。
+const OVERFLOW_POPOVER_MAX = 20;
 
 const DEFAULT_AVATAR_DATA_URI = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path d="M512 512m-512 0a512 512 0 1 0 1024 0 512 512 0 1 0-1024 0Z" fill="#1A4066"/><path d="M675.623007 719.427534H348.369612a169.86709 169.86709 0 0 0-169.859709 169.867089v11.026784a511.431685 511.431685 0 0 0 666.965432 0v-11.026784a169.86709 169.86709 0 0 0-169.852328-169.867089zM786.783912 461.892345a273.602998 273.602998 0 0 1-74.323771 187.912931H311.539859a274.776532 274.776532 0 1 1 475.244053-187.912931z" fill="#CBD5D8"/><path d="M727.738215 477.731354a215.125616 215.125616 0 0 1-48.631512 136.484128H344.9302A215.716073 215.716073 0 1 1 727.738215 477.731354z" fill="#0E243A"/><path d="M755.342079 684.612714a34.726251 34.726251 0 0 1-10.332997 24.629437 35.737408 35.737408 0 0 1-24.97633 10.185383H303.959867a35.110048 35.110048 0 0 1-35.375753-34.81482 34.549113 34.549113 0 0 1 10.406804-24.629436 35.641459 35.641459 0 0 1 24.97633-10.178002h416.072885a35.043621 35.043621 0 0 1 35.301946 34.807438z" fill="#AD382B"/><path d="M398.624881 487.761741l-51.664985-0.915208a218.779069 218.779069 0 0 1 1.476143-22.28237l51.288568 6.192418a188.222921 188.222921 0 0 0-1.099726 17.00516zM403.437105 451.699582L353.536111 438.244544a149.090385 149.090385 0 0 1 102.673086-106.666052l11.978896 50.26265-5.993138-25.131325 6.214559 25.094421a97.587776 97.587776 0 0 0-64.972409 69.895344z" fill="#CBD5D8"/><path d="M383.58299 780.554591m15.02713 0l226.77238 0q15.02713 0 15.02713 15.02713l0 119.973476q0 15.02713-15.02713 15.02713l-226.77238 0q-15.02713 0-15.02713-15.02713l0-119.973476q0-15.02713 15.02713-15.02713Z" fill="#F7F7F7"/><path d="M449.92083 855.572149m-36.822372 0a36.822373 36.822373 0 1 0 73.644745 0 36.822373 36.822373 0 1 0-73.644745 0Z" fill="#D8D8D8"/><path d="M449.92083 855.572149m-22.511172 0a22.511172 22.511172 0 1 0 45.022344 0 22.511172 22.511172 0 1 0-45.022344 0Z" fill="#C6817B"/></svg>`)}`;
 
@@ -152,6 +160,13 @@ const inviteLinkGroupName = ref("");
 const inviteLinkGroups = ref<LinkGroupOption[]>([]);
 const inviteGroupDropdownOpen = ref(false);
 
+// 解除友链关系（"删除"按钮）相关状态。
+// removingTargets 按 targetSiteId 去重避免重复点击；removeDialog* 控制确认弹窗。
+const removingTargets = ref<string[]>([]);
+const removeDialogVisible = ref(false);
+const removeTarget = ref<PlanetLinkItem | null>(null);
+const removeReason = ref("");
+
 const SIMPLE_STATUS_MAP = {
   relation: {
     self: "本站",
@@ -159,7 +174,7 @@ const SIMPLE_STATUS_MAP = {
     oneWayOut: "我已关注",
     oneWayIn: "他已关注",
     invitable: "可发起邀请",
-    sentInvite: "已发邀请",
+    sentInvite: "已邀",
     none: "没有关系",
     unknown: "暂未接入"
   }
@@ -403,15 +418,15 @@ function inviteButtonText(item: PlanetLinkItem) {
     return "正在邀请";
   }
   if (hasLocalLink(item)) {
-    return "已加友链";
+    return "已加";
   }
   if (hasActiveOutboxInvitation(item)) {
-    return "已发邀请";
+    return "已邀";
   }
   if (!canInvite(item)) {
     return invitationStateText(invitationState);
   }
-  return "发起邀请";
+  return "邀请";
 }
 
 function inviteButtonTone(item: PlanetLinkItem) {
@@ -526,6 +541,86 @@ async function submitInvite() {
   }
 }
 
+// 是否允许对该卡片显示"删除"按钮。
+// 与按钮显示"已加"对齐：对方已接入插件、可以接受邀请、当前已成边（mutual 或 single-direction following+registered）。
+// 注意：following 但对方未接入（registered=false）这种情形按钮文案是"尚未注册"，
+// 不会显示"已加"，自然也不显示删除按钮——这与 inviteButtonText 的判定保持同步。
+function canRemoveRelation(item: PlanetLinkItem) {
+  if (isSelfLink(item)) {
+    return false;
+  }
+  if (!item.targetRegistered || !item.targetSupportsInvitation) {
+    return false;
+  }
+  if (!hasLocalLink(item)) {
+    return false;
+  }
+  if (isInviting(item)) {
+    return false;
+  }
+  return true;
+}
+
+function isRemoving(item: PlanetLinkItem) {
+  const id = String(item.targetSiteId || "").trim();
+  return id !== "" && removingTargets.value.includes(id);
+}
+
+function openRemoveDialog(item: PlanetLinkItem) {
+  if (!canRemoveRelation(item)) {
+    return;
+  }
+  removeTarget.value = item;
+  removeReason.value = "";
+  removeDialogVisible.value = true;
+}
+
+function closeRemoveDialog() {
+  if (removeTarget.value && isRemoving(removeTarget.value)) {
+    return;
+  }
+  removeDialogVisible.value = false;
+  removeTarget.value = null;
+  removeReason.value = "";
+}
+
+async function submitRemove() {
+  const item = removeTarget.value;
+  if (!item) return;
+  const peerSiteId = String(item.targetSiteId || "").trim();
+  if (!peerSiteId) {
+    Toast.warning("缺少对端站点编号，无法解除");
+    return;
+  }
+  if (removingTargets.value.includes(peerSiteId)) {
+    return;
+  }
+
+  removingTargets.value = [...removingTargets.value, peerSiteId];
+  try {
+    const result = await removeFriendRelation(peerSiteId, removeReason.value);
+    if (result.removed) {
+      Toast.success("已解除友链关系");
+    } else {
+      // Hub 边本就不存在（理论上 hasLocalLink 校验过不该进入这里，但接口幂等返回成功）。
+      Toast.success("关系已解除（无变化）");
+    }
+    // 成功后直接重置弹窗状态——不能走 closeRemoveDialog()，因为它守卫 isRemoving 仍为 true 时
+    // 会拒绝关闭（removingTargets 要等 finally 才清空）。
+    removeDialogVisible.value = false;
+    removeTarget.value = null;
+    removeReason.value = "";
+    // 不做乐观本地翻面：服务端 /v1/planet/links 是关系状态唯一真相源。
+    // 这次 reload 与稍后到达的 WS 事件触发的 reload 都被 scheduleSilentReload 的 500ms
+    // 防抖合并成一次实际 HTTP 拉取，UI 状态以服务端结果为准。
+    scheduleSilentReload();
+  } catch (e) {
+    Toast.error(e instanceof Error ? e.message : "解除友链关系失败");
+  } finally {
+    removingTargets.value = removingTargets.value.filter((id) => id !== peerSiteId);
+  }
+}
+
 const isScrolling = ref(false);
 let scrollEndTimer: ReturnType<typeof setTimeout> | null = null;
 const scrollWrapEl = ref<HTMLElement | null>(null);
@@ -570,33 +665,94 @@ onMounted(() => {
   document.addEventListener("click", handleDocumentClick);
 });
 
-watch(
-  () => props.settings,
-  (value) => {
-    settingsRef.value = value;
-  },
-  { deep: true }
-);
+// 父组件 AstraHubView 单例 WS 收到事件后，原样透传到这里。
+// 处理策略（精确版）：所有事件统一走 silent reload，让服务端 /v1/planet/links 是
+// 唯一真相源。不再做任何"乐观本地翻面"——历史经验表明本地推断与 Hub 实际边表
+// 状态可能不一致（典型例子：从 mutual 删除时本地推断 none，但服务端权威是 follower），
+// 一旦不一致用户就能看到 UI 闪烁。
+// 多个 WS 事件 + HTTP 成功回调可能在同一窗口内连发，scheduleSilentReload 用 500ms
+// 防抖把它们合并成一次实际拉取，避免打抖动 Hub。
+let realtimeReloadTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleSilentReload() {
+  if (realtimeReloadTimer) {
+    clearTimeout(realtimeReloadTimer);
+  }
+  realtimeReloadTimer = setTimeout(() => {
+    realtimeReloadTimer = null;
+    void reload({ silent: true });
+  }, 500);
+}
 
-useFriendInvitationRealtime(settingsRef, (event: HubRealtimeEvent<FriendInvitationItem>) => {
-  const invitation = event.data;
-  if (!invitation) {
+function applyRealtimeEvent(event: HubRealtimeEvent<unknown>) {
+  const myId = String(props.settings.credentials.siteId || "").trim();
+  if (!myId) {
     return;
   }
-  const currentSiteId = String(props.settings.credentials.siteId || "").trim();
-  const isOutboxOwner = String(invitation.fromSite?.siteId || "").trim() === currentSiteId;
-  const isInboxOwner = String(invitation.toSite?.siteId || "").trim() === currentSiteId;
-  if (!isOutboxOwner && !isInboxOwner) {
+  // friend_relation_removed: 解除关系，actor + peer 双方都需要刷新卡片。
+  if (event.type === "friend_relation_removed") {
+    const data = (event.data || {}) as {
+      actorSiteId?: string;
+      peerSiteId?: string;
+    };
+    const actorId = String(data.actorSiteId || "").trim();
+    const peerId = String(data.peerSiteId || "").trim();
+    if (actorId !== myId && peerId !== myId) {
+      return;
+    }
+    scheduleSilentReload();
     return;
   }
-  void reload({ silent: true });
-});
+  // site_relation_updated: 涵盖审核通过 + 解除关系两类触发。无论 trigger 是什么，
+  // 只要本站点被波及（sourceSiteId 或 impactedSiteIds 包含 myId）就刷新。
+  if (event.type === "site_relation_updated") {
+    const data = (event.data || {}) as HubSiteRelationUpdatedPayload;
+    const sourceId = String(data.sourceSiteId || "").trim();
+    const impacted = Array.isArray(data.impactedSiteIds) ? data.impactedSiteIds : [];
+    let touched = sourceId === myId;
+    if (!touched) {
+      for (const raw of impacted) {
+        if (String(raw || "").trim() === myId) {
+          touched = true;
+          break;
+        }
+      }
+    }
+    if (!touched) {
+      return;
+    }
+    scheduleSilentReload();
+    return;
+  }
+  // 友链邀请类事件：data 是 FriendInvitationItem，按 fromSite/toSite 路由。
+  // 仅当本站点是双方之一时才刷新，避免无关事件触发不必要的拉取。
+  const invitation = event.data as FriendInvitationItem | undefined;
+  if (!invitation) return;
+  const fromSiteId = String(invitation.fromSite?.siteId || "").trim();
+  const toSiteId = String(invitation.toSite?.siteId || "").trim();
+  if (fromSiteId !== myId && toSiteId !== myId) {
+    return;
+  }
+  scheduleSilentReload();
+}
+
+watch(
+  () => props.realtimeEvent,
+  (event) => {
+    if (event) {
+      applyRealtimeEvent(event);
+    }
+  }
+);
 
 onBeforeUnmount(() => {
   document.removeEventListener("click", handleDocumentClick);
   if (scrollEndTimer) {
     clearTimeout(scrollEndTimer);
     scrollEndTimer = null;
+  }
+  if (realtimeReloadTimer) {
+    clearTimeout(realtimeReloadTimer);
+    realtimeReloadTimer = null;
   }
 });
 
@@ -745,11 +901,17 @@ watch(
                     +{{ sourceSiteOverflow(item) }}
                     <span class="overflow-popover">
                       <span
-                        v-for="sourceName in sourceSiteNames(item)"
+                        v-for="sourceName in sourceSiteNames(item).slice(0, OVERFLOW_POPOVER_MAX)"
                         :key="sourceName"
                         class="overflow-popover-entry"
                       >
                         {{ sourceName }}
+                      </span>
+                      <span
+                        v-if="sourceSiteNames(item).length > OVERFLOW_POPOVER_MAX"
+                        class="overflow-popover-entry overflow-popover-more"
+                      >
+                        还有 {{ sourceSiteNames(item).length - OVERFLOW_POPOVER_MAX }} 个…
                       </span>
                     </span>
                   </span>
@@ -783,11 +945,17 @@ watch(
                     +{{ tagOverflow(item) }}
                     <span class="overflow-popover">
                       <span
-                        v-for="tag in item.tags || []"
+                        v-for="tag in (item.tags || []).slice(0, OVERFLOW_POPOVER_MAX)"
                         :key="tag"
                         class="overflow-popover-entry"
                       >
                         {{ tag }}
+                      </span>
+                      <span
+                        v-if="(item.tags || []).length > OVERFLOW_POPOVER_MAX"
+                        class="overflow-popover-entry overflow-popover-more"
+                      >
+                        还有 {{ (item.tags || []).length - OVERFLOW_POPOVER_MAX }} 个…
                       </span>
                     </span>
                   </span>
@@ -810,6 +978,14 @@ watch(
                     @click="inviteLink(item)"
                   >
                     {{ inviteButtonText(item) }}
+                  </button>
+                  <button
+                    v-if="canRemoveRelation(item) || isRemoving(item)"
+                    class="invite-btn invite-btn--remove"
+                    :disabled="isRemoving(item)"
+                    @click.stop="openRemoveDialog(item)"
+                  >
+                    {{ isRemoving(item) ? "处理中..." : "删除" }}
                   </button>
                 </div>
               </div>
@@ -887,6 +1063,46 @@ watch(
       </div>
     </div>
 
+    <div v-if="removeDialogVisible" class="invite-mask" @click.self="closeRemoveDialog">
+      <div class="invite-dialog">
+        <div class="invite-dialog-title">解除友链关系</div>
+        <div class="invite-dialog-sub">
+          {{ removeTarget?.title || removeTarget?.url || "-" }}
+        </div>
+
+        <p class="remove-warning">
+          解除后将立即删除本站对该友链的本地链接，并通过邮件通知对方。此操作不可恢复。
+        </p>
+
+        <div class="invite-field">
+          <label class="invite-label">解除原因（可选）</label>
+          <textarea
+            v-model="removeReason"
+            class="invite-textarea"
+            placeholder="留空则邮件中不展示原因"
+            maxlength="300"
+          ></textarea>
+        </div>
+
+        <div class="invite-actions">
+          <button
+            class="invite-btn-ghost"
+            :disabled="removeTarget ? isRemoving(removeTarget) : false"
+            @click="closeRemoveDialog"
+          >
+            取消
+          </button>
+          <button
+            class="invite-btn-primary invite-btn-primary--danger"
+            :disabled="removeTarget ? isRemoving(removeTarget) : true"
+            @click="submitRemove"
+          >
+            {{ removeTarget && isRemoving(removeTarget) ? "解除中..." : "确认解除" }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     </div><!-- /pl-main-content -->
   </div>
 </template>
@@ -945,9 +1161,10 @@ watch(
 .overflow-badge{position:relative;display:inline-flex;align-items:center;justify-content:center;height:20px;padding:0 7px;border-radius:999px;font-size:11px;font-weight:800;cursor:help;outline:none;flex-shrink:0;letter-spacing:.01em}
 .overflow-badge--site{background:linear-gradient(135deg,#ccfbf1,#99f6e4);color:#0f766e;border:1px solid rgba(45,212,191,.5)}
 .overflow-badge--tag{background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#1d4ed8;border:1px solid rgba(147,197,253,.6)}
-.overflow-popover{position:absolute;left:50%;bottom:calc(100% + 10px);z-index:8;width:max-content;max-width:360px;transform:translate(-50%,6px);padding:9px 11px;border-radius:12px;background:rgba(15,23,42,.96);box-shadow:0 18px 42px rgba(15,23,42,.24);color:#f8fafc;opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;display:flex;flex-wrap:wrap;gap:5px}
+.overflow-popover{position:absolute;left:50%;bottom:calc(100% + 10px);z-index:8;width:max-content;max-width:360px;max-height:240px;overflow-y:auto;transform:translate(-50%,6px);padding:9px 11px;border-radius:12px;background:rgba(15,23,42,.96);box-shadow:0 18px 42px rgba(15,23,42,.24);color:#f8fafc;opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;display:flex;flex-wrap:wrap;gap:5px}
 .overflow-popover::after{content:"";position:absolute;left:50%;bottom:-5px;width:10px;height:10px;transform:translateX(-50%) rotate(45deg);background:rgba(15,23,42,.96)}
 .overflow-popover-entry{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;background:rgba(255,255,255,.12);white-space:nowrap;font-size:11px;font-weight:600}
+.overflow-popover-more{background:transparent;color:rgba(248,250,252,.6);font-weight:500}
 .overflow-badge:hover .overflow-popover,.overflow-badge:focus-visible .overflow-popover{opacity:1;transform:translate(-50%,0)}
 .relation-pill{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:700}
 .relation-text{display:flex;align-items:center;justify-content:center;min-width:0;text-align:center}
@@ -966,9 +1183,9 @@ watch(
 .fav-btn{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border:none;border-radius:50%;background:transparent;color:#d1d5db;cursor:pointer;transition:color .15s,transform .15s}
 .fav-btn:hover{color:#FCD62C;transform:scale(1.2)}
 .fav-btn--active{color:#FCD62C;filter:drop-shadow(0 0 4px rgba(252,214,44,.5))}
-.invite-btn{display:inline-flex;align-items:center;justify-content:center;outline:none;padding:5px 12px;border:2px dashed #64748b;border-radius:15px;background-color:#f1f5f9;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;transition:transform .2s ease-out;box-shadow:0 0 0 3px #f1f5f9,1.5px 1.5px 3px 1px rgba(0,0,0,.15)}
-.invite-btn:hover{transform:translateY(-4px) translateX(-2px);box-shadow:0 0 0 3px #f1f5f9,2px 5px 0 0 currentColor}
-.invite-btn:active{transform:translateY(1px) translateX(1px);box-shadow:0 0 0 3px #f1f5f9,0 0 0 0 currentColor}
+.invite-btn{display:inline-flex;align-items:center;justify-content:center;outline:none;padding:5px 12px;border:2px dashed #64748b;border-radius:15px;background-color:#f1f5f9;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;transition:box-shadow .2s ease,filter .2s ease;box-shadow:0 0 0 3px #f1f5f9,1.5px 1.5px 3px 1px rgba(0,0,0,.15);white-space:nowrap}
+.invite-btn:hover{box-shadow:0 0 0 3px #f1f5f9,2px 5px 0 0 currentColor;filter:brightness(.96)}
+.invite-btn:active{box-shadow:0 0 0 3px #f1f5f9,0 0 0 0 currentColor;filter:brightness(.92)}
 .invite-btn--action{border-color:#075985;color:#075985;background-color:#f0f9ff;box-shadow:0 0 0 3px #f0f9ff,1.5px 1.5px 3px 1px rgba(0,0,0,.15)}
 .invite-btn--action:hover{box-shadow:0 0 0 3px #f0f9ff,2px 5px 0 0 #075985}
 .invite-btn--linked{border-color:#047857;color:#047857;background-color:#ecfdf5;box-shadow:0 0 0 3px #ecfdf5,1.5px 1.5px 3px 1px rgba(0,0,0,.15)}
@@ -980,6 +1197,8 @@ watch(
 .invite-btn--warning{border-color:#fcd34d;background:linear-gradient(180deg,#fffbeb 0%,#fef3c7 100%);color:#b45309}
 .invite-btn--loading{border-color:#93c5fd;background:linear-gradient(180deg,#eff6ff 0%,#dbeafe 100%);color:#1d4ed8}
 .invite-btn--muted{border-color:#fda4af;background:linear-gradient(180deg,#fff1f2 0%,#ffe4e6 100%);color:#be123c}
+.invite-btn--remove{border-color:#fca5a5;background:linear-gradient(180deg,#fef2f2 0%,#fee2e2 100%);color:#b91c1c}
+.invite-btn--remove:hover{box-shadow:0 0 0 3px #fef2f2,2px 5px 0 0 #b91c1c}
 .invite-btn:disabled{cursor:not-allowed;opacity:1}
 .planet-links-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:200px}
 .planet-links-more{padding:14px 16px;text-align:center;font-size:12px;color:#94a3b8;background:#fff}
@@ -1017,4 +1236,7 @@ watch(
 .invite-btn-ghost:hover,.invite-btn-primary:hover{transform:translateY(-4px) translateX(-2px);box-shadow:0 0 0 3px #f1f5f9,2px 5px 0 0 currentColor}
 .invite-btn-ghost:active,.invite-btn-primary:active{transform:translateY(1px) translateX(1px);box-shadow:0 0 0 3px #f1f5f9,0 0 0 0 currentColor}
 .invite-btn-primary{border-color:#075985;color:#075985;background-color:#f0f9ff;box-shadow:0 0 0 3px #f0f9ff,1.5px 1.5px 3px 1px rgba(0,0,0,.15)}
+.invite-btn-primary--danger{border-color:#b91c1c;color:#b91c1c;background-color:#fef2f2;box-shadow:0 0 0 3px #fef2f2,1.5px 1.5px 3px 1px rgba(0,0,0,.15)}
+.invite-btn-primary--danger:hover{box-shadow:0 0 0 3px #fef2f2,2px 5px 0 0 #b91c1c}
+.remove-warning{margin:14px 0 0;padding:10px 12px;border-radius:10px;border:1px solid #fecaca;background:#fff1f2;color:#9f1239;font-size:12px;line-height:1.6}
 </style>

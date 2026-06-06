@@ -1,25 +1,16 @@
 package run.halo.astrahub;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 import run.halo.app.extension.ListOptions;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.astrahub.model.Link;
 import run.halo.astrahub.model.LinkGroup;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -28,7 +19,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
 @Slf4j
@@ -36,113 +26,28 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class AstraHubCollectionService {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(5))
-        .followRedirects(HttpClient.Redirect.NORMAL)
-        .build();
-    private static final String PLUGIN_LINKS_API =
-        "/apis/api.plugin.halo.run/v1alpha1/plugins/PluginLinks/links?keyword=&page=1&size=2000&sort=spec.priority%2Casc";
-
     private final ReactiveExtensionClient client;
 
     public Mono<CollectedPayload> collect() {
-        return collectInternal(null);
+        return collectInternal();
     }
 
     public Mono<CollectedPayload> collect(ServerRequest request) {
-        return collectInternal(request);
+        return collectInternal();
     }
 
-    private Mono<CollectedPayload> collectInternal(ServerRequest request) {
-        return Mono.zip(listLinks(request), listLinkGroups())
+    private Mono<CollectedPayload> collectInternal() {
+        return Mono.zip(listLinks(), listLinkGroups())
             .map(tuple -> buildPayload(tuple.getT1(), tuple.getT2()));
     }
 
-    private Mono<List<Link>> listLinks(ServerRequest request) {
-        return listLinksFromExtensions()
-            .flatMap(extensionLinks -> {
-                if (request == null) {
-                    return Mono.just(extensionLinks);
-                }
-                return listLinksFromPluginApi(request)
-                    .map(fallbackLinks -> mergeLinks(extensionLinks, fallbackLinks));
-            });
-    }
-
-    private Mono<List<Link>> listLinksFromExtensions() {
+    private Mono<List<Link>> listLinks() {
         return client.listAll(Link.class, new ListOptions(), Sort.by("spec.priority"))
             .collectList()
             .onErrorResume(error -> {
                 log.warn("[AstraHub] failed to list links from extensions", error);
                 return Mono.just(List.of());
             });
-    }
-
-    private Mono<List<Link>> listLinksFromPluginApi(ServerRequest request) {
-        return Mono.fromCallable(() -> listLinksFromPluginApiBlocking(request))
-            .subscribeOn(Schedulers.boundedElastic())
-            .onErrorResume(error -> {
-                log.warn("[AstraHub] failed to list links from PluginLinks API", error);
-                return Mono.just(List.of());
-            });
-    }
-
-    private List<Link> listLinksFromPluginApiBlocking(ServerRequest request) throws Exception {
-        String baseUrl = resolveBaseUrl(request);
-        if (baseUrl.isEmpty()) {
-            return List.of();
-        }
-
-        URI endpoint = URI.create(baseUrl + PLUGIN_LINKS_API);
-        HttpRequest.Builder builder = HttpRequest.newBuilder()
-            .uri(endpoint)
-            .timeout(Duration.ofSeconds(8))
-            .header("Accept", "application/json")
-            .GET();
-
-        HttpResponse<String> response = HTTP_CLIENT.send(
-            builder.build(),
-            HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
-        );
-
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            log.warn("[AstraHub] PluginLinks API returned status {}", response.statusCode());
-            return List.of();
-        }
-
-        String body = Optional.ofNullable(response.body()).orElse("");
-        if (body.isBlank()) {
-            return List.of();
-        }
-
-        JsonNode root = MAPPER.readTree(body);
-        JsonNode items = root.path("items");
-        if (!items.isArray()) {
-            items = root.path("data").path("items");
-        }
-        if (!items.isArray() && root.isArray()) {
-            items = root;
-        }
-        if (!items.isArray()) {
-            return List.of();
-        }
-
-        List<Link> links = new ArrayList<>();
-        for (JsonNode item : items) {
-            try {
-                Link link = MAPPER.convertValue(item, Link.class);
-                if (link != null) {
-                    links.add(link);
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        if (!links.isEmpty()) {
-            log.info("[AstraHub] collected {} links from PluginLinks API fallback", links.size());
-        }
-        return links;
     }
 
     private Mono<List<LinkGroup>> listLinkGroups() {
@@ -272,53 +177,6 @@ public class AstraHubCollectionService {
         );
     }
 
-    private static String resolveBaseUrl(ServerRequest request) {
-        if (request == null) {
-            return "";
-        }
-
-        String proto = firstHeaderValue(request, "X-Forwarded-Proto");
-        if (proto.isEmpty()) {
-            proto = parseForwardedField(request.headers().firstHeader("Forwarded"), "proto");
-        }
-        if (proto.isEmpty()) {
-            proto = trim(request.uri().getScheme());
-        }
-
-        String host = firstHeaderValue(request, "X-Forwarded-Host");
-        if (host.isEmpty()) {
-            host = parseForwardedField(request.headers().firstHeader("Forwarded"), "host");
-        }
-        if (host.isEmpty()) {
-            host = firstHeaderValue(request, "Host");
-        }
-        if (host.isEmpty()) {
-            host = trim(request.uri().getAuthority());
-        }
-
-        if (proto.isEmpty() || host.isEmpty()) {
-            return "";
-        }
-        return proto + "://" + host;
-    }
-
-    private static List<Link> mergeLinks(List<Link> extensionLinks, List<Link> fallbackLinks) {
-        Map<String, Link> merged = new LinkedHashMap<>();
-        safeList(extensionLinks).forEach(link -> {
-            String name = readName(link);
-            if (!name.isEmpty()) {
-                merged.putIfAbsent(name, link);
-            }
-        });
-        safeList(fallbackLinks).forEach(link -> {
-            String name = readName(link);
-            if (!name.isEmpty()) {
-                merged.putIfAbsent(name, link);
-            }
-        });
-        return new ArrayList<>(merged.values());
-    }
-
     private static String normalizeLinkUrl(String raw) {
         String value = trim(raw);
         if (value.isEmpty()) {
@@ -331,44 +189,6 @@ public class AstraHubCollectionService {
             return value;
         }
         return "https://" + value;
-    }
-
-    private static String firstHeaderValue(ServerRequest request, String header) {
-        String raw = trim(request.headers().firstHeader(header));
-        if (raw.isEmpty()) {
-            return "";
-        }
-        int comma = raw.indexOf(',');
-        if (comma >= 0) {
-            return trim(raw.substring(0, comma));
-        }
-        return raw;
-    }
-
-    private static String parseForwardedField(String header, String key) {
-        String raw = trim(header);
-        if (raw.isEmpty()) {
-            return "";
-        }
-
-        String first = raw;
-        int comma = first.indexOf(',');
-        if (comma >= 0) {
-            first = first.substring(0, comma);
-        }
-
-        for (String token : first.split(";")) {
-            String value = trim(token);
-            if (!value.regionMatches(true, 0, key + "=", 0, key.length() + 1)) {
-                continue;
-            }
-            String extracted = trim(value.substring(key.length() + 1));
-            if (extracted.startsWith("\"") && extracted.endsWith("\"") && extracted.length() >= 2) {
-                extracted = extracted.substring(1, extracted.length() - 1);
-            }
-            return trim(extracted);
-        }
-        return "";
     }
 
     private static String readName(run.halo.app.extension.AbstractExtension extension) {

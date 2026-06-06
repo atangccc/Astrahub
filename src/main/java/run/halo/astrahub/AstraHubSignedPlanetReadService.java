@@ -33,9 +33,10 @@ public class AstraHubSignedPlanetReadService {
         .build();
 
     private final ReactiveSettingFetcher settingFetcher;
+    private final AstraHubCredentialReader credentialReader;
 
     public Mono<SignedReadResult> fetch(String path, Map<String, String> query) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> fetchBlocking(path, query, tuple.getT1(), tuple.getT2()))
                 .subscribeOn(Schedulers.boundedElastic()));
     }

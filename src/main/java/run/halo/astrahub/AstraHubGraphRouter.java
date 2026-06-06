@@ -9,17 +9,22 @@ import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+import reactor.netty.http.client.HttpClient;
 import run.halo.app.core.extension.endpoint.CustomEndpoint;
 import run.halo.app.extension.GroupVersion;
 import run.halo.app.plugin.ReactiveSettingFetcher;
 
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -51,7 +56,11 @@ import static org.springdoc.core.fn.builders.apiresponse.Builder.responseBuilder
 public class AstraHubGraphRouter implements CustomEndpoint {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    // 显式禁用重定向跟随：否则攻击者可用一个公网 URL 302 跳转到内网地址，
+    // 绕过下方基于 DNS 解析的 IP 校验。followRedirect(false) 确保只连初始(已校验)主机。
     private static final WebClient AVATAR_CLIENT = WebClient.builder()
+        .clientConnector(new ReactorClientHttpConnector(
+            HttpClient.create().followRedirect(false)))
         .codecs(c -> c.defaultCodecs().maxInMemorySize(2 * 1024 * 1024))
         .build();
     /** Max payload returned to the browser. */
@@ -304,6 +313,29 @@ public class AstraHubGraphRouter implements CustomEndpoint {
             return ServerResponse.badRequest().bodyValue("invalid host");
         }
 
+        // SSRF 防护：在发起请求前解析目标主机的所有 IP，命中私网/环回/链路本地
+        // (含云元数据 169.254.169.254)/多播/未指定地址即拒绝。与 Go 端头像代理
+        // (frontend_avatar.go 的拨号层 isDisallowedDialIP) 保持一致的硬化基线。
+        // 注意：WebClient 默认会自动跟随重定向，若不在此关闭，攻击者可用一个公网
+        // URL 302 跳转到内网绕过本校验，因此下方 AVATAR_CLIENT 已禁用重定向跟随。
+        final String host = uri.getHost();
+        return Mono.fromCallable(() -> resolveAndValidateHost(host))
+            .subscribeOn(Schedulers.boundedElastic())
+            .flatMap(allowed -> {
+                if (!allowed) {
+                    return ServerResponse.badRequest().bodyValue("blocked host");
+                }
+                return fetchAvatar(uri, rawUrl);
+            })
+            .onErrorResume(error -> {
+                // 头像代理校验失败属于"友链方域名解析不到 / 已下线 / 私网地址"等正常情况，
+                // 数量大且非异常路径，避免在 WARN 级别污染日志，下沉到 DEBUG 即可。
+                log.debug("[AstraHub] avatar proxy host validation failed url={}", rawUrl, error);
+                return ServerResponse.badRequest().bodyValue("blocked host");
+            });
+    }
+
+    private Mono<ServerResponse> fetchAvatar(URI uri, String rawUrl) {
         return AVATAR_CLIENT.get()
             .uri(uri)
             .header(HttpHeaders.USER_AGENT, "AstraHub-Plugin-Avatar/1.0")
@@ -333,9 +365,77 @@ public class AstraHubGraphRouter implements CustomEndpoint {
             })
             .timeout(Duration.ofSeconds(8))
             .onErrorResume(error -> {
-                log.warn("[AstraHub] avatar proxy failed url={}", rawUrl, error);
+                // 上游头像 4xx/5xx/超时/连接重置等都很常见（友链失联、CDN 抖动），
+                // 不属于本插件错误，下沉到 DEBUG 防止刷屏。
+                log.debug("[AstraHub] avatar proxy failed url={}", rawUrl, error);
                 return ServerResponse.status(502).bodyValue("upstream failed");
             });
+    }
+
+    /**
+     * 解析主机名的所有 A/AAAA 记录，逐个校验目标 IP 是否允许访问。
+     * 任意一个解析结果落在内网/环回/链路本地/多播/未指定地址段即整体拒绝，
+     * 以此根除基于 DNS 的 SSRF（攻击者把自有域名解析到内网地址）。
+     *
+     * @return 全部解析结果均为公网地址时返回 true；否则 false。
+     */
+    private static boolean resolveAndValidateHost(String host) {
+        if (host == null || host.isBlank()) {
+            return false;
+        }
+        // 去掉 IPv6 字面量两端的方括号，便于 getAllByName 解析。
+        String normalized = host.trim();
+        if (normalized.startsWith("[") && normalized.endsWith("]")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        try {
+            InetAddress[] addresses = InetAddress.getAllByName(normalized);
+            if (addresses.length == 0) {
+                return false;
+            }
+            for (InetAddress address : addresses) {
+                if (isDisallowedAddress(address)) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (UnknownHostException ex) {
+            return false;
+        }
+    }
+
+    /**
+     * 判定一个已解析出的 IP 是否禁止访问（内网/环回/链路本地/多播/未指定/站点本地）。
+     * 等价于 Go 端 isDisallowedDialIP 的判定口径。
+     */
+    private static boolean isDisallowedAddress(InetAddress address) {
+        if (address == null) {
+            return true;
+        }
+        return address.isAnyLocalAddress()        // 0.0.0.0 / ::
+            || address.isLoopbackAddress()        // 127.0.0.0/8 / ::1
+            || address.isLinkLocalAddress()       // 169.254.0.0/16（含云元数据）/ fe80::/10
+            || address.isSiteLocalAddress()       // 10/172.16/192.168 等私网 / fec0::
+            || address.isMulticastAddress()       // 224.0.0.0/4 / ff00::/8
+            || isUniqueLocalIPv6(address)         // fc00::/7（IPv6 唯一本地，Java 未单独覆盖）
+            || isCgnatOrExtraPrivate(address);    // 100.64.0.0/10 运营商级 NAT
+    }
+
+    /** IPv6 唯一本地地址 fc00::/7（isSiteLocalAddress 对 IPv6 不覆盖此段）。 */
+    private static boolean isUniqueLocalIPv6(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        return bytes != null && bytes.length == 16 && (bytes[0] & 0xFE) == 0xFC;
+    }
+
+    /** IPv4 运营商级 NAT 100.64.0.0/10（Java 标准方法未覆盖）。 */
+    private static boolean isCgnatOrExtraPrivate(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        if (bytes == null || bytes.length != 4) {
+            return false;
+        }
+        int b0 = bytes[0] & 0xFF;
+        int b1 = bytes[1] & 0xFF;
+        return b0 == 100 && b1 >= 64 && b1 <= 127;
     }
 
     private static String escapeJson(String value) {

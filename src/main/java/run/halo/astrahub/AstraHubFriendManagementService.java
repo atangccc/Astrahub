@@ -2,6 +2,7 @@ package run.halo.astrahub;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
@@ -44,6 +45,7 @@ public class AstraHubFriendManagementService {
     private static final String HUB_ACK_PATH_TEMPLATE = "/v1/friend-invitations/%s/ack";
     private static final String HUB_CANCEL_PATH_TEMPLATE = "/v1/friend-invitations/%s/cancel";
     private static final String HUB_DELETE_PATH_TEMPLATE = "/v1/friend-invitations/%s/delete";
+    private static final String HUB_REMOVE_RELATION_PATH_TEMPLATE = "/v1/friend-relations/%s/remove";
     private static final String HUB_SITE_LOOKUP_PATH = "/v1/sites/lookup";
     private static final String HUB_SITE_RELATION_BATCH_PATH = "/v1/relations/sites/batch";
     private static final String HUB_WS_TOKEN_PATH = "/v1/ws-token";
@@ -51,9 +53,11 @@ public class AstraHubFriendManagementService {
     private final ReactiveSettingFetcher settingFetcher;
     private final ReactiveExtensionClient client;
     private final AstraHubFriendSettingsService friendSettingsService;
+    private final AstraHubFriendLinkReconcileService friendLinkReconcileService;
+    private final AstraHubCredentialReader credentialReader;
 
     public Mono<FriendInvitationsQueryResult> list(FriendInvitationsQuery query) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> listBlocking(
                     query,
                     tuple.getT1(),
@@ -87,7 +91,7 @@ public class AstraHubFriendManagementService {
     public Mono<ReviewResult> review(ReviewCommand command) {
         return Mono.zip(
                 readSetting("connection"),
-                readSetting("credentials"),
+                credentialReader.readCredentials(),
                 friendSettingsService.readInvitationSettings()
             )
             .flatMap(tuple -> Mono.fromCallable(() -> reviewBlocking(
@@ -97,11 +101,32 @@ public class AstraHubFriendManagementService {
                     tuple.getT3()
                 ))
                 .subscribeOn(Schedulers.boundedElastic())
-            );
+            )
+            .flatMap(result -> reconcileLocalLinkAfterApproval(command, result));
+    }
+
+    private Mono<ReviewResult> reconcileLocalLinkAfterApproval(ReviewCommand command, ReviewResult result) {
+        if (!command.approved() || result == null || !result.success() || result.invitation() == null) {
+            return Mono.just(result);
+        }
+        String reviewerSiteId = trim(result.invitation().toSite() == null ? null : result.invitation().toSite().siteId());
+        return friendLinkReconcileService.reconcile(result.invitation(), reviewerSiteId)
+            .doOnNext(reconcile -> {
+                if (!reconcile.success()) {
+                    log.warn("[AstraHub] approved invitation {} but local link reconcile failed: {}",
+                        result.invitation().inviteId(), reconcile.message());
+                }
+            })
+            .onErrorResume(error -> {
+                log.warn("[AstraHub] approved invitation {} but local link reconcile threw",
+                    result.invitation().inviteId(), error);
+                return Mono.empty();
+            })
+            .thenReturn(result);
     }
 
     public Mono<AckResult> ack(AckCommand command) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> ackBlocking(
                     command,
                     tuple.getT1(),
@@ -112,7 +137,7 @@ public class AstraHubFriendManagementService {
     }
 
     public Mono<CancelResult> cancel(CancelCommand command) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> cancelBlocking(
                     command,
                     tuple.getT1(),
@@ -123,8 +148,19 @@ public class AstraHubFriendManagementService {
     }
 
     public Mono<DeleteResult> delete(DeleteCommand command) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> deleteBlocking(
+                    command,
+                    tuple.getT1(),
+                    tuple.getT2()
+                ))
+                .subscribeOn(Schedulers.boundedElastic())
+            );
+    }
+
+    public Mono<RemoveFriendRelationResult> removeFriendRelation(RemoveFriendRelationCommand command) {
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
+            .flatMap(tuple -> Mono.fromCallable(() -> removeFriendRelationBlocking(
                     command,
                     tuple.getT1(),
                     tuple.getT2()
@@ -136,7 +172,7 @@ public class AstraHubFriendManagementService {
     public Mono<CreateResult> create(CreateCommand command) {
         return Mono.zip(
                 readSetting("connection"),
-                readSetting("credentials"),
+                credentialReader.readCredentials(),
                 friendSettingsService.readInvitationSettings()
             )
             .flatMap(tuple -> Mono.fromCallable(() -> createBlocking(
@@ -150,7 +186,7 @@ public class AstraHubFriendManagementService {
     }
 
     public Mono<SiteLookupResult> lookupSiteByUrl(String rawUrl) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> lookupSiteByUrlBlocking(
                     rawUrl,
                     tuple.getT1(),
@@ -161,7 +197,7 @@ public class AstraHubFriendManagementService {
     }
 
     public Mono<SiteRelationBatchResult> resolveSiteRelations(List<String> targetUrls) {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> resolveSiteRelationsBlocking(
                     targetUrls,
                     tuple.getT1(),
@@ -172,7 +208,7 @@ public class AstraHubFriendManagementService {
     }
 
     public Mono<RealtimeTokenResult> issueRealtimeToken() {
-        return Mono.zip(readSetting("connection"), readSetting("credentials"))
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> issueRealtimeTokenBlocking(
                     tuple.getT1(),
                     tuple.getT2()
@@ -607,6 +643,85 @@ public class AstraHubFriendManagementService {
         }
     }
 
+    private RemoveFriendRelationResult removeFriendRelationBlocking(
+        RemoveFriendRelationCommand command,
+        JsonNode connection,
+        JsonNode credentials
+    ) {
+        String hubBaseUrl = normalizeBaseUrl(readString(connection, "hubBaseUrl", ""));
+        String siteId = readString(credentials, "siteId", "");
+        String apiKey = readString(credentials, "apiKey", "");
+        String peerSiteId = trim(command.peerSiteId());
+        String reason = trim(command.reason());
+
+        if (hubBaseUrl == null) {
+            return RemoveFriendRelationResult.failed(400, "hubBaseUrl is invalid");
+        }
+        if (siteId.isEmpty()) {
+            return RemoveFriendRelationResult.failed(400, "siteId is required");
+        }
+        if (apiKey.isEmpty()) {
+            return RemoveFriendRelationResult.failed(400, "apiKey is required");
+        }
+        if (peerSiteId.isEmpty()) {
+            return RemoveFriendRelationResult.failed(400, "peerSiteId is required");
+        }
+
+        String path = HUB_REMOVE_RELATION_PATH_TEMPLATE.formatted(peerSiteId);
+        String endpoint = hubBaseUrl + path;
+
+        // 仅当用户填写了 reason 才发送 body；空 body 与有 body 走同样签名规则。
+        String body = "";
+        if (!reason.isEmpty()) {
+            ObjectNode payload = MAPPER.createObjectNode();
+            payload.put("reason", reason);
+            body = payload.toString();
+        }
+
+        try {
+            SignedRequest signed = HubRequestSigner.signRequest("POST", path, body, siteId, apiKey);
+            HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .timeout(Duration.ofSeconds(15))
+                .header("Accept", "application/json")
+                .header("X-BP-Site-Id", signed.siteId())
+                .header("X-BP-Timestamp", signed.timestamp())
+                .header("X-BP-Nonce", signed.nonce())
+                .header("X-BP-Signature", signed.signature());
+            if (body.isEmpty()) {
+                builder.POST(HttpRequest.BodyPublishers.noBody());
+            } else {
+                builder.header("Content-Type", "application/json");
+                builder.POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+            }
+
+            HttpResponse<String> response = HTTP_CLIENT.send(
+                builder.build(),
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+            );
+
+            int statusCode = response.statusCode();
+            if (isRedirect(statusCode)) {
+                return RemoveFriendRelationResult.failed(statusCode, buildRedirectMessage(response, "remove relation failed"));
+            }
+            JsonNode json = parseJson(response.body());
+            if (statusCode < 200 || statusCode >= 300) {
+                return RemoveFriendRelationResult.failed(statusCode, extractMessage(json, "remove relation failed"));
+            }
+            return new RemoveFriendRelationResult(
+                true,
+                statusCode,
+                extractMessage(json, "ok"),
+                json.path("removed").asBoolean(false),
+                trim(json.path("peerSiteId").asText("")),
+                trim(json.path("peerSiteUrl").asText(""))
+            );
+        } catch (Exception error) {
+            log.warn("[AstraHub] remove friend relation failed", error);
+            return RemoveFriendRelationResult.failed(500, "remove relation failed: " + error.getMessage());
+        }
+    }
+
     private SiteLookupResult lookupSiteByUrlBlocking(String rawUrl, JsonNode connection, JsonNode credentials) {
         String hubBaseUrl = normalizeBaseUrl(readString(connection, "hubBaseUrl", ""));
         String targetUrl = trim(rawUrl);
@@ -1031,6 +1146,12 @@ public class AstraHubFriendManagementService {
     ) {
     }
 
+    public record RemoveFriendRelationCommand(
+        String peerSiteId,
+        String reason
+    ) {
+    }
+
     public record FriendInvitationSiteInfo(
         String siteId,
         String siteName,
@@ -1115,6 +1236,19 @@ public class AstraHubFriendManagementService {
     ) {
         public static DeleteResult failed(int status, String message) {
             return new DeleteResult(false, status, message, null);
+        }
+    }
+
+    public record RemoveFriendRelationResult(
+        boolean success,
+        int status,
+        String message,
+        boolean removed,
+        String peerSiteId,
+        String peerSiteUrl
+    ) {
+        public static RemoveFriendRelationResult failed(int status, String message) {
+            return new RemoveFriendRelationResult(false, status, message, false, "", "");
         }
     }
 

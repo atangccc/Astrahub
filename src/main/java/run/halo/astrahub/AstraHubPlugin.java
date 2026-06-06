@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import run.halo.app.extension.Scheme;
 import run.halo.app.extension.SchemeManager;
+import run.halo.app.extension.index.IndexSpecs;
 import run.halo.app.plugin.BasePlugin;
 import run.halo.app.plugin.PluginContext;
 import run.halo.astrahub.model.FriendInvitation;
@@ -37,7 +38,31 @@ public class AstraHubPlugin extends BasePlugin {
 
     @Override
     public void start() {
-        schemeManager.register(FriendInvitation.class);
+        schemeManager.register(FriendInvitation.class, indexSpecs -> {
+            indexSpecs.add(IndexSpecs.<FriendInvitation, String>single(
+                    "spec.invitationId", String.class)
+                .indexFunc(record -> record.getSpec() == null
+                    ? null : record.getSpec().getInvitationId())
+            );
+            indexSpecs.add(IndexSpecs.<FriendInvitation, String>single(
+                    "spec.direction", String.class)
+                .indexFunc(record -> {
+                    if (record.getSpec() == null || record.getSpec().getDirection() == null) {
+                        return null;
+                    }
+                    return record.getSpec().getDirection().name();
+                })
+            );
+            indexSpecs.add(IndexSpecs.<FriendInvitation, String>single(
+                    "spec.status", String.class)
+                .indexFunc(record -> {
+                    if (record.getSpec() == null || record.getSpec().getStatus() == null) {
+                        return null;
+                    }
+                    return record.getSpec().getStatus().name();
+                })
+            );
+        });
         reportOrchestratorService.startScheduler();
         friendInboxSyncService.start();
         friendOutboxSyncService.start();

@@ -15,16 +15,26 @@ import {
   syncFriendInvitationOutbox,
   reviewFriendInvitation
 } from "../../composables/useFriendInvitations";
-import { useFriendInvitationRealtime, type HubRealtimeEvent } from "../../composables/useFriendInvitationRealtime";
+import type { HubRealtimeEvent } from "../../composables/useFriendInvitationRealtime";
 
 type FriendInvitationTab = "all" | "pending" | "accepted" | "rejected" | "outbox";
 
 const props = defineProps<{
   settings: AstraHubSettings;
   activeTab: FriendInvitationTab;
+  // 由父组件统一持有 WS 后透传过来的最新事件。
+  // 父组件常驻订阅，确保用户在任何页面都能让红点 +1/-1；本组件挂载时只复用这个流刷新当前 tab 的列表行，不再自开 WS。
+  // 事件流包含友链邀请相关 + site_relation_updated；后者由 applyRealtimeInvitationEvent 内部跳过。
+  realtimeEvent?: HubRealtimeEvent<unknown> | null;
 }>();
 
-const settingsRef = computed(() => props.settings);
+// 本地审批/拒绝后，按 inviteId 通知父组件立即把红点 -1（不等 WS 回声、不刷整页）。
+// 父组件用 Set 去重保证幂等：本地操作 + WS 回声携带同一 inviteId 不会重复扣减。
+// add 由父组件的 WS 直接处理，子组件未挂载时也能 +1，因此这里不再发 add。
+const emit = defineEmits<{
+  (e: "pending-inbox-remove", inviteId: string): void;
+}>();
+
 const activeTab = computed(() => props.activeTab);
 
 const DEFAULT_AVATAR_DATA_URI = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path d="M512 512m-512 0a512 512 0 1 0 1024 0 512 512 0 1 0-1024 0Z" fill="#1A4066"/><path d="M675.623007 719.427534H348.369612a169.86709 169.86709 0 0 0-169.859709 169.867089v11.026784a511.431685 511.431685 0 0 0 666.965432 0v-11.026784a169.86709 169.86709 0 0 0-169.852328-169.867089zM786.783912 461.892345a273.602998 273.602998 0 0 1-74.323771 187.912931H311.539859a274.776532 274.776532 0 1 1 475.244053-187.912931z" fill="#CBD5D8"/><path d="M727.738215 477.731354a215.125616 215.125616 0 0 1-48.631512 136.484128H344.9302A215.716073 215.716073 0 1 1 727.738215 477.731354z" fill="#0E243A"/><path d="M755.342079 684.612714a34.726251 34.726251 0 0 1-10.332997 24.629437 35.737408 35.737408 0 0 1-24.97633 10.185383H303.959867a35.110048 35.110048 0 0 1-35.375753-34.81482 34.549113 34.549113 0 0 1 10.406804-24.629436 35.641459 35.641459 0 0 1 24.97633-10.178002h416.072885a35.043621 35.043621 0 0 1 35.301946 34.807438z" fill="#AD382B"/><path d="M398.624881 487.761741l-51.664985-0.915208a218.779069 218.779069 0 0 1 1.476143-22.28237l51.288568 6.192418a188.222921 188.222921 0 0 0-1.099726 17.00516zM403.437105 451.699582L353.536111 438.244544a149.090385 149.090385 0 0 1 102.673086-106.666052l11.978896 50.26265-5.993138-25.131325 6.214559 25.094421a97.587776 97.587776 0 0 0-64.972409 69.895344z" fill="#CBD5D8"/><path d="M383.58299 780.554591m15.02713 0l226.77238 0q15.02713 0 15.02713 15.02713l0 119.973476q0 15.02713-15.02713 15.02713l-226.77238 0q-15.02713 0-15.02713-15.02713l0-119.973476q0-15.02713 15.02713-15.02713Z" fill="#F7F7F7"/><path d="M449.92083 855.572149m-36.822372 0a36.822373 36.822373 0 1 0 73.644745 0 36.822373 36.822373 0 1 0-73.644745 0Z" fill="#D8D8D8"/><path d="M449.92083 855.572149m-22.511172 0a22.511172 22.511172 0 1 0 45.022344 0 22.511172 22.511172 0 1 0-45.022344 0Z" fill="#C6817B"/></svg>`)}`;
@@ -156,7 +166,7 @@ function isMyOutbox(item: FriendInvitationItem) {
 }
 
 function canReview(item: FriendInvitationItem) {
-  return activeTab.value === "pending" && item.status === "pending";
+  return directionOf(item) === "inbox" && item.status === "pending";
 }
 
 function currentSiteId() {
@@ -220,11 +230,11 @@ function markCancelling(inviteId: string, value: boolean) {
 }
 
 function canRetry(item: FriendInvitationItem) {
-  return activeTab.value === "outbox" && item.status === "accepted" && item.deliveryStatus !== "acknowledged";
+  return directionOf(item) === "outbox" && item.status === "accepted" && item.deliveryStatus !== "acknowledged";
 }
 
 function canCancel(item: FriendInvitationItem) {
-  return activeTab.value === "outbox" && item.status === "pending";
+  return directionOf(item) === "outbox" && item.status === "pending";
 }
 
 function removeLocalItem(inviteId: string) {
@@ -378,9 +388,14 @@ function matchesCurrentTab(item: FriendInvitationItem) {
   return false;
 }
 
-function applyRealtimeInvitationEvent(event: HubRealtimeEvent<FriendInvitationItem>) {
-  const rawInvitation = event.data;
-  if (!rawInvitation) {
+function applyRealtimeInvitationEvent(event: HubRealtimeEvent<unknown>) {
+  // 父组件透传过来的事件流里也包含 site_relation_updated；它的 data 不是 FriendInvitationItem，
+  // 与友链邀请列表没关系，直接跳过。
+  if (event.type === "site_relation_updated") {
+    return;
+  }
+  const rawInvitation = event.data as FriendInvitationItem | undefined;
+  if (!rawInvitation || !rawInvitation.inviteId) {
     return;
   }
   const myId = currentSiteId();
@@ -393,11 +408,11 @@ function applyRealtimeInvitationEvent(event: HubRealtimeEvent<FriendInvitationIt
   const visible = matchesCurrentTab(invitation);
   if (visible) {
     upsertLocalItem(invitation);
-    return;
-  }
-  if (exists) {
+  } else if (exists) {
     removeLocalItem(invitation.inviteId);
   }
+  // 红点（pending 数）由父组件直接根据 WS 事件维护，这里不再 emit add/remove，
+  // 子组件只负责把当前 tab 的列表行做增量更新。
 }
 
 async function reload() {
@@ -537,10 +552,7 @@ async function removeInvitation(item: FriendInvitationItem) {
   if (isDeleting(item.inviteId)) {
     return;
   }
-  const msg = activeTab.value === "outbox"
-    ? "确认删除这条发件记录吗？待审核发件会先撤回邀请，再删除本地记录。"
-    : "确认删除这条记录吗？这会删除当前插件本地缓存。";
-  showConfirmDialog(msg, async () => {
+  showConfirmDialog("确认删除这条邀请记录吗？", async () => {
     markDeleting(item.inviteId, true);
     try {
       await deleteFriendInvitation(item.inviteId);
@@ -655,6 +667,22 @@ async function submitReview() {
     if (reviewMode.value === "approve" && reviewedInvitation) {
       await reconcileFriendInvitation(reviewedInvitation, currentSiteId());
     }
+    // 审核是收件箱操作，Hub 已在响应里回传权威的最新状态（已通过/已拒绝）。
+    // 直接用它即时更新本地这一行：仍属当前 tab 则替换，否则移除（如"待审核"tab 通过后该行应消失）。
+    // 这样红点立刻消失，不依赖 WS 回声或 reload 的 sync 是否成功。
+    if (reviewedInvitation) {
+      const reviewedItem = {
+        ...reviewedInvitation,
+        __direction: "inbox"
+      } as FriendInvitationItem & { __direction: "inbox" | "outbox" };
+      if (matchesCurrentTab(reviewedItem)) {
+        replaceLocalItem(reviewedItem);
+      } else {
+        removeLocalItem(reviewedItem.inviteId);
+      }
+    }
+    // 审核是收件箱操作，pending 数随之 -1，按 inviteId 通知父组件移除红点计数（不刷整页）。
+    emit("pending-inbox-remove", reviewTarget.value.inviteId);
     reviewing.value = false;
     closeReviewDialog();
     Toast.success(reviewMode.value === "approve" ? "友链邀请已通过" : "友链邀请已拒绝");
@@ -730,9 +758,16 @@ onBeforeUnmount(() => {
   }
 });
 
-useFriendInvitationRealtime(settingsRef, (event) => {
-  applyRealtimeInvitationEvent(event);
-});
+// 父组件常驻 WS 订阅，子组件挂载时通过 prop 消费同一份事件流，避免重复连接，
+// 也保证用户切回友链管理 tab 时仍能实时刷新当前列表行。
+watch(
+  () => props.realtimeEvent,
+  (event) => {
+    if (event) {
+      applyRealtimeInvitationEvent(event);
+    }
+  }
+);
 
 watch(activeTab, () => {
   reload();
@@ -861,22 +896,22 @@ watch(
               </div>
 
               <div class="action-cell">
-                <template v-if="activeTab === 'pending' && canReview(item)">
+                <template v-if="canReview(item)">
                   <button class="action-btn approve" @click="openApproveDialog(item)">通过</button>
                   <button class="action-btn reject" @click="openRejectDialog(item)">拒绝</button>
                 </template>
-                <template v-else-if="activeTab === 'outbox' && canCancel(item)">
+                <template v-else-if="canCancel(item)">
                   <button class="action-btn reject" :disabled="isCancelling(item.inviteId)" @click="cancelInvitation(item)">
                     {{ isCancelling(item.inviteId) ? "撤回中..." : "撤回" }}
                   </button>
                 </template>
-                <template v-else-if="activeTab === 'outbox' && canRetry(item)">
+                <template v-else-if="canRetry(item)">
                   <button class="action-btn approve" :disabled="isRetrying(item.inviteId)" @click="retryOutboxInvitation(item)">
                     {{ isRetrying(item.inviteId) ? "重试中..." : "重试" }}
                   </button>
                 </template>
                 <button
-                  v-if="activeTab !== 'pending'"
+                  v-if="item.status !== 'pending'"
                   class="action-btn delete"
                   :disabled="isDeleting(item.inviteId)"
                   @click="removeInvitation(item)"

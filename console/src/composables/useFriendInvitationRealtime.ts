@@ -5,12 +5,18 @@ import { buildHubWsUrl, issueAstraHubRealtimeToken } from "./useAstraHubRealtime
 
 const RECONNECT_DELAY_MS = 3000;
 
-type FriendInvitationRealtimeEventType =
+// 关心的 Hub 实时事件白名单：友链邀请相关 + 关系刷新事件。
+// site_relation_updated 是 Hub 在审核通过时主动广播的"立即翻面"事件，
+// 携带 sourceSiteId / impactedSiteIds，路由到双方。前端必须消费它，否则
+// 邀请方需要等 Hub 物化表 hub_planet_link_items 重建 tick（>=5s）后才能看到互关。
+type HubInvitationRealtimeEventType =
   | "friend_invitation_created"
   | "friend_invitation_reviewed"
   | "friend_invitation_acked"
   | "friend_invitation_cancelled"
-  | "friend_invitation_deleted";
+  | "friend_invitation_deleted"
+  | "friend_relation_removed"
+  | "site_relation_updated";
 
 export interface HubRealtimeEvent<T = unknown> {
   id?: string;
@@ -19,27 +25,60 @@ export interface HubRealtimeEvent<T = unknown> {
   data?: T;
 }
 
-const FRIEND_INVITATION_EVENT_TYPES = new Set<FriendInvitationRealtimeEventType>([
+/**
+ * site_relation_updated 事件的 payload 结构，由 Hub 在审核通过时广播。
+ * impactedSiteIds 同时包含邀请方与审批方双方的 siteId。
+ */
+export interface HubSiteRelationUpdatedPayload {
+  sourceSiteId?: string;
+  sourceSiteUrl?: string;
+  sourceSiteName?: string;
+  impactedSiteIds?: string[];
+  trigger?: string;
+  inviteId?: string;
+}
+
+const HUB_INVITATION_REALTIME_EVENT_TYPES = new Set<HubInvitationRealtimeEventType>([
   "friend_invitation_created",
   "friend_invitation_reviewed",
   "friend_invitation_acked",
   "friend_invitation_cancelled",
-  "friend_invitation_deleted"
+  "friend_invitation_deleted",
+  "friend_relation_removed",
+  "site_relation_updated"
 ]);
 
-function isRelevantInvitationEvent(
-  event: HubRealtimeEvent<FriendInvitationItem>,
+function isRelevantHubEvent(
+  event: HubRealtimeEvent<unknown>,
   currentSiteId: string
 ) {
-  if (!FRIEND_INVITATION_EVENT_TYPES.has(event.type as FriendInvitationRealtimeEventType)) {
-    return false;
-  }
-  const invitation = event.data;
-  if (!invitation) {
+  const type = event.type as HubInvitationRealtimeEventType;
+  if (!HUB_INVITATION_REALTIME_EVENT_TYPES.has(type)) {
     return false;
   }
   const siteId = String(currentSiteId || "").trim();
   if (!siteId) {
+    return false;
+  }
+  if (type === "site_relation_updated") {
+    const data = (event.data || {}) as HubSiteRelationUpdatedPayload;
+    if (String(data.sourceSiteId || "").trim() === siteId) {
+      return true;
+    }
+    const impacted = Array.isArray(data.impactedSiteIds) ? data.impactedSiteIds : [];
+    return impacted.some((id) => String(id || "").trim() === siteId);
+  }
+  if (type === "friend_relation_removed") {
+    // payload: { actorSiteId, peerSiteId, ... }，路由给主动方与被动方双方。
+    const data = (event.data || {}) as { actorSiteId?: string; peerSiteId?: string };
+    return (
+      String(data.actorSiteId || "").trim() === siteId ||
+      String(data.peerSiteId || "").trim() === siteId
+    );
+  }
+  // 友链邀请事件：data 是 FriendInvitationItem，按 fromSite/toSite 路由。
+  const invitation = event.data as FriendInvitationItem | undefined;
+  if (!invitation) {
     return false;
   }
   return (
@@ -50,7 +89,7 @@ function isRelevantInvitationEvent(
 
 export function useFriendInvitationRealtime(
   settings: Ref<AstraHubSettings>,
-  onRelevantEvent: (event: HubRealtimeEvent<FriendInvitationItem>) => void
+  onRelevantEvent: (event: HubRealtimeEvent<unknown>) => void
 ) {
   let socket: WebSocket | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -115,8 +154,8 @@ export function useFriendInvitationRealtime(
 
     ws.onmessage = (messageEvent) => {
       try {
-        const event = JSON.parse(String(messageEvent.data)) as HubRealtimeEvent<FriendInvitationItem>;
-        if (isRelevantInvitationEvent(event, currentSiteId)) {
+        const event = JSON.parse(String(messageEvent.data)) as HubRealtimeEvent<unknown>;
+        if (isRelevantHubEvent(event, currentSiteId)) {
           onRelevantEvent(event);
         }
       } catch {

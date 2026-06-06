@@ -105,6 +105,36 @@ class HubRealtimeBridgeTest {
     }
 
     @Test
+    void shouldParseFriendRelationRemovedEvent() {
+        HubRealtimeBridge.ParsedHubEvent parsed = HubRealtimeBridge.parseHubMascotEvent("""
+            {
+              "id": "evt_remove",
+              "type": "friend_relation_removed",
+              "data": {
+                "actorSiteId": "site_a",
+                "actorSiteUrl": "https://a.example",
+                "actorSiteName": "Site A",
+                "peerSiteId": "site_b",
+                "peerSiteUrl": "https://b.example",
+                "reason": "试运行结束"
+              }
+            }
+            """);
+
+        assertThat(parsed.eventId()).isEqualTo("evt_remove");
+        // mascot 类事件不应被填充。
+        assertThat(parsed.event()).isNull();
+        assertThat(parsed.bubble()).isNull();
+        // 关键：friend_relation_removed 解析出的双方信息要齐全。
+        HubRealtimeBridge.FriendRelationRemovedEvent removed = parsed.relationRemoved();
+        assertThat(removed).isNotNull();
+        assertThat(removed.actorSiteId()).isEqualTo("site_a");
+        assertThat(removed.actorSiteUrl()).isEqualTo("https://a.example");
+        assertThat(removed.peerSiteId()).isEqualTo("site_b");
+        assertThat(removed.peerSiteUrl()).isEqualTo("https://b.example");
+    }
+
+    @Test
     void shouldRejectDuplicateRecentEventIds() {
         HubRealtimeBridge.RecentEventIds recent = new HubRealtimeBridge.RecentEventIds(2);
 
