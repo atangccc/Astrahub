@@ -86,6 +86,7 @@ public class AstraHubNewsRouter implements CustomEndpoint {
         );
         putIfPresent(result, "size", size);
         putIfPresent(result, "cursor", request.queryParam("cursor").orElse(""));
+        putIfPresent(result, "onlyMyGalaxy", request.queryParam("onlyMyGalaxy").orElse(""));
         return result;
     }
 
@@ -111,6 +112,7 @@ public class AstraHubNewsRouter implements CustomEndpoint {
         );
         putIfPresent(result, "size", size);
         putIfPresent(result, "cursor", request.queryParam("cursor").orElse(""));
+        putIfPresent(result, "onlyMyGalaxy", request.queryParam("onlyMyGalaxy").orElse(""));
         return result;
     }
 

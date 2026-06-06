@@ -40,6 +40,7 @@ function buildQuery(params: Record<string, string | number | undefined | null>) 
 export interface BrowseQuery {
   pageSize?: number;
   cursor?: string;
+  onlyMyGalaxy?: boolean;
 }
 
 export interface SearchQuery {
@@ -47,6 +48,7 @@ export interface SearchQuery {
   page?: number;
   pageSize?: number;
   cursor?: string;
+  onlyMyGalaxy?: boolean;
 }
 
 export interface DiscoverQuery {
@@ -55,11 +57,17 @@ export interface DiscoverQuery {
 }
 
 export async function fetchNewsBrowse(query: BrowseQuery = {}): Promise<NewsBrowseResponse> {
-  return getJson<NewsBrowseResponse>(`${BASE}/browse${buildQuery({ ...query })}`);
+  const { onlyMyGalaxy, ...rest } = query;
+  return getJson<NewsBrowseResponse>(
+    `${BASE}/browse${buildQuery({ ...rest, onlyMyGalaxy: onlyMyGalaxy ? "true" : "" })}`
+  );
 }
 
 export async function fetchNewsSearch(query: SearchQuery): Promise<NewsBrowseResponse> {
-  return getJson<NewsBrowseResponse>(`${BASE}/search${buildQuery({ ...query })}`);
+  const { onlyMyGalaxy, ...rest } = query;
+  return getJson<NewsBrowseResponse>(
+    `${BASE}/search${buildQuery({ ...rest, onlyMyGalaxy: onlyMyGalaxy ? "true" : "" })}`
+  );
 }
 
 export async function fetchNewsDiscover(query: DiscoverQuery = {}): Promise<NewsDiscoverResponse> {

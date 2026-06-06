@@ -2,11 +2,13 @@
 defineProps<{
   text?: string;
   hint?: string;
+  /** 是否包虚线框容器；默认 false（与其它空态页面一致，无边框）。 */
+  framed?: boolean;
 }>();
 </script>
 
 <template>
-  <div class="sp-empty-state">
+  <div class="sp-empty-state" :class="{ 'sp-empty-state--framed': framed === true }">
     <svg class="sp-empty-state-icon" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" width="120" height="120">
       <path d="M217.0088 482.0912l315.36-64.8v133.2z" fill="#416191"/>
       <path d="M851.3288 482.0912l-318.96-64.8v133.2zM211.2488 881.6912l321.12 76.32v-419.76l-321.12-52.56z" fill="#5074AE"/>
@@ -25,4 +27,12 @@ defineProps<{
 .sp-empty-state-icon{opacity:.4}
 .sp-empty-state-text{font-size:14px;font-weight:600;color:#64748b}
 .sp-empty-state-hint{font-size:12px;color:#94a3b8}
+/* 可选虚线框包装（framed=true 时启用） */
+.sp-empty-state--framed{
+  background:rgba(255,255,255,.6);
+  border:1px dashed #cbd5e1;
+  border-radius:14px;
+  min-height:240px;
+  justify-content:center;
+}
 </style>

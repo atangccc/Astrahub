@@ -39,6 +39,20 @@ const initialized = ref(false);
 const showReadLater = ref(false);
 let readLaterSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
+// ——— 我的星系 ———
+const onlyMyGalaxy = ref(false);
+
+function toggleMyGalaxy() {
+  showReadLater.value = false;
+  selectedSourceId.value = "";
+  onlyMyGalaxy.value = !onlyMyGalaxy.value;
+  const feedEl = scrollWrapRef.value;
+  if (feedEl) {
+    feedEl.scrollTop = 0;
+  }
+  void reloadItems();
+}
+
 function isBookmarked(item: NewsItem): boolean {
   return props.settings.readLater.items.some(b => b.url === item.url);
 }
@@ -166,12 +180,12 @@ async function reloadItems() {
   try {
     let response;
     if (isBrowseMode()) {
-      response = await fetchNewsBrowse({ pageSize: PAGE_SIZE });
+      response = await fetchNewsBrowse({ pageSize: PAGE_SIZE, onlyMyGalaxy: onlyMyGalaxy.value });
     } else {
       const keyword = searchKeyword();
       response = keyword
-        ? await fetchNewsSearch({ q: keyword, pageSize: PAGE_SIZE })
-        : await fetchNewsBrowse({ pageSize: PAGE_SIZE });
+        ? await fetchNewsSearch({ q: keyword, pageSize: PAGE_SIZE, onlyMyGalaxy: onlyMyGalaxy.value })
+        : await fetchNewsBrowse({ pageSize: PAGE_SIZE, onlyMyGalaxy: onlyMyGalaxy.value });
     }
     items.value = Array.isArray(response.items) ? response.items : [];
     nextCursor.value = String(response.nextCursor || "").trim();
@@ -201,13 +215,13 @@ async function loadMoreItems() {
         hasMore.value = false;
         return;
       }
-      response = await fetchNewsBrowse({ pageSize: PAGE_SIZE, cursor: nextCursor.value });
+      response = await fetchNewsBrowse({ pageSize: PAGE_SIZE, cursor: nextCursor.value, onlyMyGalaxy: onlyMyGalaxy.value });
     } else {
       const keyword = searchKeyword();
       const nextPage = searchPage.value + 1;
       response = keyword
-        ? await fetchNewsSearch({ q: keyword, page: nextPage, pageSize: PAGE_SIZE })
-        : await fetchNewsBrowse({ pageSize: PAGE_SIZE, cursor: nextCursor.value });
+        ? await fetchNewsSearch({ q: keyword, page: nextPage, pageSize: PAGE_SIZE, onlyMyGalaxy: onlyMyGalaxy.value })
+        : await fetchNewsBrowse({ pageSize: PAGE_SIZE, cursor: nextCursor.value, onlyMyGalaxy: onlyMyGalaxy.value });
       searchPage.value = nextPage;
     }
     const more = Array.isArray(response.items) ? response.items : [];
@@ -236,6 +250,7 @@ async function reloadSources() {
 
 function selectSource(sourceId: string) {
   showReadLater.value = false;
+  onlyMyGalaxy.value = false;
   if (selectedSourceId.value === sourceId) {
     selectedSourceId.value = "";
   } else {
@@ -347,7 +362,7 @@ watch(
     </div>
 
     <!-- 全局无数据：未选择任何源、不在稍后阅读模式、且所有源都没有文章 -->
-    <div v-else-if="initialized && !selectedSourceId && !showReadLater && items.length === 0 && sources.length === 0" class="news-global-empty">
+    <div v-else-if="initialized && !selectedSourceId && !showReadLater && !onlyMyGalaxy && items.length === 0 && sources.length === 0" class="news-global-empty">
       <EmptyState
         :text="error || '暂无资讯'"
         :hint="error ? '请检查 Hub 地址或网络连接' : '主星还未聚合到任何 RSS 源内容'"
@@ -366,7 +381,7 @@ watch(
           type="button"
           class="news-source-item news-source-item--readlater"
           :class="{ active: showReadLater }"
-          @click="showReadLater = !showReadLater"
+          @click="onlyMyGalaxy = false; showReadLater = !showReadLater"
         >
           <div class="news-source-avatar news-source-avatar--readlater">
             <svg viewBox="0 0 1024 1024" width="18" height="18" xmlns="http://www.w3.org/2000/svg"><path d="M959.24224 401.32608c-7.36256-24.57088-28.78976-43.22304-63.6928-55.43936a15.36 15.36 0 0 0-1.3824-0.43008l-189.54752-51.4304c-41.09824-62.68416-82.25792-125.34272-123.40736-188.01664-0.17408-0.24576-0.54272-0.8192-0.7168-1.06496-19.79904-27.68896-44.48256-42.94656-69.46304-42.94656-18.06336 0-44.544 7.78752-68.38784 45.2096L337.08032 278.69184c-47.27296 14.32576-94.54592 28.71808-141.84448 43.10016L126.1056 342.81984C93.91104 353.28 73.56928 370.2016 65.64864 393.12896c-8.30976 24.0896-2.46784 52.1728 17.87904 85.87264 0.49152 0.82432 1.03424 1.60768 1.61792 2.34496a203168.54272 203168.54272 0 0 1 124.05248 157.1584c-2.11968 75.5712-4.2752 151.2192-6.47168 226.87232-3.15392 36.21888 2.08896 61.74208 16 78.0288 10.54208 12.3392 25.20064 18.59072 43.5712 18.59072 14.07488 0 30.7712-3.67616 53.2992-11.86816l182.52288-74.2912a116757.43744 116757.43744 0 0 0 207.60064 77.18912c13.62432 4.38784 26.23488 6.60992 37.49888 6.60992 25.68192 0 69.27872-11.81184 72.76544-90.96192a21.24288 21.24288 0 0 0-0.02048-2.42176c-3.81952-67.45088-7.68-134.74304-11.53536-202.08128l-0.0512-0.88576 134.43584-180.78208c20.74112-29.82912 27.61728-57.15968 20.4288-81.1776z" fill="#FCD62C" /><path d="M905.0112 455.04l-139.04896 186.95168a23.63904 23.63904 0 0 0-4.55168 15.43168l0.5376 9.51808c3.82976 66.90304 7.67488 133.7856 11.4688 200.8064-2.35008 46.63296-20.44416 46.63296-30.20288 46.63296-7.08096 0-15.54432-1.56672-24.31488-4.36736a142424.4224 142424.4224 0 0 1-214.05696-79.63136 20.1984 20.1984 0 0 0-14.63808 0.21504l-189.06624 76.9792c-16.9984 6.1696-29.70624 9.1648-38.8352 9.1648-8.85248 0-11.20256-2.74944-12.08832-3.77344-2.45248-2.87744-7.85408-12.90752-5.05344-44.02688 0.03584-0.4864 0.07168-0.96768 0.08704-1.4592 2.2784-78.78656 4.52608-157.55264 6.7328-236.23168a23.6032 23.6032 0 0 0-4.97152-15.21664 163892.8896 163892.8896 0 0 0-128.37376-162.66752c-11.77088-19.80928-16.2816-35.2256-13.02016-44.63616 3.82976-11.10528 20.0192-18.432 32.5632-22.50752L206.9504 365.312c49.8432-15.16544 99.62496-30.3104 149.43232-45.40928a21.36064 21.36064 0 0 0 11.96032-9.3696l109.7216-178.2272c7.27552-11.42272 18.91328-25.05216 32.98304-25.05216 11.37664 0 24.01792 8.91904 35.29216 24.6784 42.65472 64.95744 85.31456 129.90464 127.91296 194.87744a21.28896 21.28896 0 0 0 12.1856 8.98048L882.90816 389.12c20.21888 7.17312 32.91648 16.37376 35.78368 25.93792 2.7392 9.14432-2.2784 23.54176-13.68064 39.98208z" fill="#FCD62C" /></svg>
@@ -378,8 +393,22 @@ watch(
         </button>
         <button
           type="button"
+          class="news-source-item news-source-item--galaxy"
+          :class="{ active: onlyMyGalaxy }"
+          @click="toggleMyGalaxy"
+        >
+          <div class="news-source-avatar news-source-avatar--galaxy">
+            <svg viewBox="0 0 1024 1024" width="18" height="18" xmlns="http://www.w3.org/2000/svg"><path d="M249.6 723.2c19.2 0 38.4 0 64-6.4h12.8c51.2 44.8 115.2 76.8 192 76.8 153.6 0 275.2-121.6 275.2-275.2 0-12.8 0-32-6.4-44.8l19.2-19.2c57.6-57.6 76.8-108.8 57.6-147.2-19.2-38.4-89.6-44.8-192-19.2-44.8-38.4-96-51.2-153.6-51.2-153.6 0-281.6 121.6-281.6 275.2v6.4c-70.4 70.4-96 128-76.8 166.4 12.8 25.6 44.8 38.4 89.6 38.4z m268.8 32c-57.6 0-108.8-19.2-147.2-51.2 64-19.2 140.8-44.8 211.2-89.6 70.4-38.4 128-76.8 179.2-121.6V512c-6.4 134.4-115.2 243.2-243.2 243.2z m332.8-441.6c12.8 25.6-6.4 70.4-57.6 128l-6.4 6.4c-19.2-64-51.2-115.2-96-153.6 83.2-19.2 140.8-12.8 160 19.2z m-332.8-44.8c121.6 0 224 89.6 236.8 204.8-51.2 44.8-115.2 89.6-185.6 128-76.8 38.4-153.6 70.4-217.6 89.6-51.2-44.8-76.8-108.8-76.8-179.2 0-134.4 108.8-243.2 243.2-243.2zM236.8 544c6.4 57.6 32 115.2 70.4 153.6-70.4 12.8-115.2 6.4-134.4-19.2-12.8-32 12.8-76.8 64-134.4z" fill="currentColor"></path></svg>
+          </div>
+          <div class="news-source-meta">
+            <div class="news-source-name">我的星系</div>
+            <div class="news-source-sub">仅看友链</div>
+          </div>
+        </button>
+        <button
+          type="button"
           class="news-source-item"
-          :class="{ active: !selectedSourceId && !showReadLater }"
+          :class="{ active: !selectedSourceId && !showReadLater && !onlyMyGalaxy }"
           @click="selectSource('')"
         >
           <div class="news-source-avatar news-source-avatar--all">
@@ -424,8 +453,9 @@ watch(
       </div>
 
       <div class="news-feed-header">
-        <span class="news-feed-title-main">{{ showReadLater ? '稍后阅读' : '星链资讯' }}</span>
-        <span v-if="!showReadLater && indexedItems > 0" class="news-feed-title-meta">已聚合 {{ indexedItems }} 条 · {{ formatTime(refreshedAt) }}</span>
+        <span class="news-feed-title-main">{{ showReadLater ? '稍后阅读' : (onlyMyGalaxy ? '我的星系' : '星链资讯') }}</span>
+        <span v-if="!showReadLater && !onlyMyGalaxy && indexedItems > 0" class="news-feed-title-meta">已聚合 {{ indexedItems }} 条 · {{ formatTime(refreshedAt) }}</span>
+        <span v-if="!showReadLater && onlyMyGalaxy" class="news-feed-title-meta">仅展示友链对端的 RSS 资讯</span>
         <span v-if="showReadLater" class="news-feed-title-meta">{{ readLaterCount }} 篇已收藏</span>
       </div>
 
@@ -474,7 +504,12 @@ watch(
       </div>
 
       <div v-else-if="!loading && items.length === 0" class="news-feed-empty">
-        <EmptyState text="暂无资讯" hint="主星还未聚合到符合条件的内容" />
+        <EmptyState
+          v-if="onlyMyGalaxy"
+          text="我的星系暂无资讯"
+          hint="可能是你的友链还未接入 RSS，或当前都没有新文章。"
+        />
+        <EmptyState v-else text="暂无资讯" hint="主星还未聚合到符合条件的内容" />
       </div>
 
       <article
@@ -572,6 +607,9 @@ watch(
 .news-card-btn:active{transform:translateY(1px) translateX(1px);box-shadow:0 0 0 3px #f1f5f9,0 0 0 0 currentColor}
 .news-source-item--readlater{margin-bottom:4px}
 .news-source-avatar--readlater{background:linear-gradient(135deg,#fffbeb,#fef3c7);display:flex;align-items:center;justify-content:center}
+.news-source-item--galaxy{margin-bottom:4px}
+.news-source-avatar--galaxy{background:linear-gradient(135deg,#ede9fe,#c4b5fd);display:flex;align-items:center;justify-content:center;color:#5b21b6}
+.news-source-item--galaxy.active{background:linear-gradient(135deg,#ede9fe,#ddd6fe);border-color:#a78bfa;box-shadow:0 0 0 2px rgba(167,139,250,.25)}
 .news-feed-more{flex-shrink:0;padding:14px 16px 22px;text-align:center;font-size:12px;color:#94a3b8}
 .news-feed-sentinel{flex-shrink:0;height:1px;width:100%;pointer-events:none}
 .news-loading-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#ffffff;z-index:1;border-radius:14px}

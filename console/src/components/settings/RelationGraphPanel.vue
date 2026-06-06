@@ -4,6 +4,7 @@ import ForceGraph3D, { type ForceGraph3DInstance } from "3d-force-graph";
 import * as THREE from "three";
 import type { AstraHubSettings } from "../../types";
 import { DEFAULT_AVATAR_DATA_URI } from "../../data/defaultAvatar";
+import EmptyState from "../common/EmptyState.vue";
 import {
   useRelationGraph,
   type GraphCanvasEdge,
@@ -35,6 +36,8 @@ interface ForceNode {
   fx?: number;
   fy?: number;
   fz?: number;
+  // 节点连接度；0 = 孤立节点（球外壳环绕），>=1 = 收在球内。
+  __degree?: number;
 }
 
 interface ForceLink {
@@ -332,6 +335,15 @@ function pushDataToGraph() {
   const linkList: ForceLink[] = [];
   for (const edge of edges.value.values()) {
     linkList.push({ source: edge.source, target: edge.target, raw: edge });
+  }
+  // 计算每个节点连接度（无向：source/target 各 +1），供边界力分区。
+  const degreeById = new Map<string, number>();
+  for (const link of linkList) {
+    degreeById.set(link.source, (degreeById.get(link.source) ?? 0) + 1);
+    degreeById.set(link.target, (degreeById.get(link.target) ?? 0) + 1);
+  }
+  for (const node of nodeList) {
+    node.__degree = degreeById.get(node.id) ?? 0;
   }
   graph.graphData({ nodes: nodeList, links: linkList });
 }
@@ -816,7 +828,12 @@ function findForceNodeById(id: string): ForceNode | null {
 }
 
 function buildBoundaryForce(radius: number) {
-  const radiusSq = radius * radius;
+  const innerRadius = radius;
+  const innerRadiusSq = innerRadius * innerRadius;
+  // 孤立节点（degree===0）的外壳：明显在球外（1.7×），环绕主球展示。
+  const isolatedRadius = radius * 1.7;
+  // 软回推按 alpha 衰减，冷却后推不动；这里再叠一道无视 alpha 的硬钳，确保 degree>=1 收在球内。
+  const hardInnerRadius = innerRadius * 1.02;
   let nodes: ForceNode[] = [];
   const force = (alpha: number) => {
     const k = 0.18 * alpha;
@@ -824,15 +841,58 @@ function buildBoundaryForce(radius: number) {
       const x = node.x ?? 0;
       const y = node.y ?? 0;
       const z = node.z ?? 0;
+      const degree = node.__degree ?? 0;
+      if (degree === 0) {
+        // 孤立节点：每帧无视 alpha 硬钉到外壳球面，只保留切向速度形成环绕。
+        const n0 = node as unknown as Record<string, number>;
+        const dist = Math.sqrt(x * x + y * y + z * z);
+        if (dist < 1e-6) {
+          node.x = isolatedRadius;
+          node.y = 0;
+          node.z = 0;
+          n0.vx = 0;
+          n0.vy = 0;
+          n0.vz = 0;
+          continue;
+        }
+        const scale = isolatedRadius / dist;
+        node.x = x * scale;
+        node.y = y * scale;
+        node.z = z * scale;
+        const vx = n0.vx ?? 0;
+        const vy = n0.vy ?? 0;
+        const vz = n0.vz ?? 0;
+        const radialV = (vx * x + vy * y + vz * z) / (dist * dist);
+        n0.vx = vx - radialV * x;
+        n0.vy = vy - radialV * y;
+        n0.vz = vz - radialV * z;
+        continue;
+      }
+      // 有关联节点：软回推 + 硬钳，收在内球。
       const distSq = x * x + y * y + z * z;
-      if (distSq <= radiusSq) continue;
+      if (distSq <= innerRadiusSq) continue;
       const dist = Math.sqrt(distSq);
-      const overshoot = (dist - radius) / radius;
+      const overshoot = (dist - innerRadius) / innerRadius;
       const factor = k * (1 + overshoot);
       const n = node as unknown as Record<string, number>;
       n.vx = (n.vx ?? 0) - x * factor;
       n.vy = (n.vy ?? 0) - y * factor;
       n.vz = (n.vz ?? 0) - z * factor;
+      if (dist > hardInnerRadius) {
+        const scale = hardInnerRadius / dist;
+        node.x = x * scale;
+        node.y = y * scale;
+        node.z = z * scale;
+        const vx = n.vx ?? 0;
+        const vy = n.vy ?? 0;
+        const vz = n.vz ?? 0;
+        const radialV = (vx * x + vy * y + vz * z) / distSq;
+        if (radialV > 0) {
+          n.vx = vx - radialV * x;
+          n.vy = vy - radialV * y;
+          n.vz = vz - radialV * z;
+        }
+      }
     }
   };
   (force as unknown as { initialize: (input: ForceNode[]) => void }).initialize = (input) => {
@@ -1066,9 +1126,11 @@ const detailCardStyle = computed<Record<string, string>>(() => {
 
 <template>
   <div class="rg-panel">
-    <div v-if="!credentialReady" class="rg-empty rg-empty-static">
-      <p>当前站点尚未接入星链，无法加载关系图。</p>
-      <p>请先在「接入配置」完成星链接入。</p>
+    <div v-if="!credentialReady" class="rg-empty-static-wrap">
+      <EmptyState
+        text="当前站点尚未接入星链，无法加载关系图。"
+        hint="请先在「接入配置」完成星链接入。"
+      />
     </div>
 
     <div v-else ref="wrapRef" class="rg-canvas-wrap" :class="{ 'rg-fullscreen': isFullscreen }">
@@ -1543,23 +1605,17 @@ const detailCardStyle = computed<Record<string, string>>(() => {
   text-align: center;
   padding: 16px;
 }
-.rg-empty-static {
-  background: rgba(255, 255, 255, 0.6);
-  color: #475569;
-  border: 1px dashed #cbd5e1;
-  border-radius: 14px;
+.rg-empty-static-wrap {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
   min-height: 360px;
-  gap: 8px;
-  padding: 16px;
-  text-align: center;
 }
-.rg-empty-overlay p,
-.rg-empty-static p { margin: 0; }
+.rg-empty-static-wrap :deep(.sp-empty-state) {
+  flex: 1;
+  justify-content: center;
+}
+.rg-empty-overlay p { margin: 0; }
 .rg-error p { margin: 0 0 8px; color: #fca5a5; }
 
 .rg-spinner {

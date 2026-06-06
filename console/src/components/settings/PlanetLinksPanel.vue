@@ -802,7 +802,7 @@ watch(
             draggable="false"
           />
           <div class="planet-hero-scroll-hint" aria-hidden="true">
-            <span class="planet-hero-scroll-text">下滑探索友链</span>
+            <span class="planet-hero-scroll-text">下滑探索星球</span>
             <svg viewBox="0 0 24 24" fill="none" class="planet-hero-scroll-icon">
               <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
