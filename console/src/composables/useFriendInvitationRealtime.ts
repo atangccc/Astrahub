@@ -5,10 +5,6 @@ import { buildHubWsUrl, issueAstraHubRealtimeToken } from "./useAstraHubRealtime
 
 const RECONNECT_DELAY_MS = 3000;
 
-// 关心的 Hub 实时事件白名单：友链邀请相关 + 关系刷新事件。
-// site_relation_updated 是 Hub 在审核通过时主动广播的"立即翻面"事件，
-// 携带 sourceSiteId / impactedSiteIds，路由到双方。前端必须消费它，否则
-// 邀请方需要等 Hub 物化表 hub_planet_link_items 重建 tick（>=5s）后才能看到互关。
 type HubInvitationRealtimeEventType =
   | "friend_invitation_created"
   | "friend_invitation_reviewed"

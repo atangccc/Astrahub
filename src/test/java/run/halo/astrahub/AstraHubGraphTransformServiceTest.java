@@ -47,7 +47,8 @@ class AstraHubGraphTransformServiceTest {
                 "https://friend.example/rss.xml",
                 8,
                 List.of("indie"),
-                "2026-03-01T08:00:00Z"
+                "2026-03-01T08:00:00Z",
+                ""
             ))
         )));
 

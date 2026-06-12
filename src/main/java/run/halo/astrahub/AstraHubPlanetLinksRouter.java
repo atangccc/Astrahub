@@ -57,6 +57,8 @@ public class AstraHubPlanetLinksRouter implements CustomEndpoint {
         request.queryParam("size").ifPresent(value -> putIfNotBlank(query, "size", value));
         request.queryParam("cursor").ifPresent(value -> putIfNotBlank(query, "cursor", value));
         request.queryParam("tag").ifPresent(value -> putIfNotBlank(query, "tag", value));
+        request.queryParam("keyword").ifPresent(value -> putIfNotBlank(query, "keyword", value));
+        request.queryParam("relation").ifPresent(value -> putIfNotBlank(query, "relation", value));
         return query;
     }
 

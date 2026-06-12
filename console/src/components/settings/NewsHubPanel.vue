@@ -18,6 +18,8 @@ const props = defineProps<{
 
 const PAGE_SIZE = 40;
 const SOURCE_LIMIT = 80;
+const SOURCE_ROW_HEIGHT = 64;
+const SOURCE_OVERSCAN = 6;
 
 const DEFAULT_AVATAR_DATA_URI = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path d="M512 512m-512 0a512 512 0 1 0 1024 0 512 512 0 1 0-1024 0Z" fill="#1A4066"/><path d="M675.623007 719.427534H348.369612a169.86709 169.86709 0 0 0-169.859709 169.867089v11.026784a511.431685 511.431685 0 0 0 666.965432 0v-11.026784a169.86709 169.86709 0 0 0-169.852328-169.867089zM786.783912 461.892345a273.602998 273.602998 0 0 1-74.323771 187.912931H311.539859a274.776532 274.776532 0 1 1 475.244053-187.912931z" fill="#CBD5D8"/><path d="M727.738215 477.731354a215.125616 215.125616 0 0 1-48.631512 136.484128H344.9302A215.716073 215.716073 0 1 1 727.738215 477.731354z" fill="#0E243A"/></svg>`)}`;
 
@@ -32,8 +34,15 @@ const hasMore = ref(false);
 const loading = ref(false);
 const loadingMore = ref(false);
 const sourceLoading = ref(false);
+const sourceLoadingMore = ref(false);
+const sourcesNextCursor = ref("");
+const sourcesHasMore = ref(false);
 const error = ref("");
 const initialized = ref(false);
+
+const sourcesScrollRef = ref<HTMLElement | null>(null);
+const sourcesScrollTop = ref(0);
+const sourcesViewportH = ref(0);
 
 // ——— 稍后阅读 ———
 const showReadLater = ref(false);
@@ -85,13 +94,7 @@ function debounceReadLaterSave() {
 
 const readLaterCount = computed(() => props.settings.readLater.items.length);
 
-// 后端 (`/v1/planet/rss-deep-space/browse|search`) 已经按
-// `CASE WHEN published_at <= 1971-01-01 THEN updated_at ELSE published_at END DESC, item_id DESC`
-// 严格排好序并按 cursor 分页。
-// 前端只负责拼接，不再二次排序，避免：
-//   1) 撰写日期为 1970-01-01 的卡片被前端再次按 publishedAt 沉底
-//   2) 每次 append 触发 computed 全量重排导致 v-for 出现 DOM move（视觉抖动）
-//   3) 重排后用户视口里的卡片相对容器顶端的偏移变化，scrollTop 未变带来的"自动滑动"错觉
+
 
 const appliedSearch = computed(() => String(props.searchQuery || "").trim());
 
@@ -101,12 +104,7 @@ let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 const isScrolling = ref(false);
 const scrollWrapRef = ref<HTMLElement | null>(null);
 
-// 哨兵元素 + IntersectionObserver 实现"按需加载"：
-//   - 哨兵在列表末尾，hasMore=true 时渲染
-//   - observer 在哨兵进入视口（含 rootMargin 提前量）时触发一次 loadMoreItems
-//   - 加载完成 + items 追加 > 哨兵被推到新内容下方 > 自动离开视口
-//   - 用户必须再滑动让哨兵重新进入视口才会再次触发
-//   - 抖动时哨兵 isIntersecting 状态不变 > 浏览器不会回调
+
 const loadMoreSentinelRef = ref<HTMLElement | null>(null);
 let loadMoreObserver: IntersectionObserver | null = null;
 
@@ -240,11 +238,76 @@ async function reloadSources() {
   try {
     const response = await fetchNewsDiscover({ size: SOURCE_LIMIT });
     sources.value = Array.isArray(response.items) ? response.items : [];
+    sourcesNextCursor.value = String(response.nextCursor || "").trim();
+    sourcesHasMore.value = Boolean(response.hasMore) && sourcesNextCursor.value !== "";
+    if (sourcesScrollRef.value) {
+      sourcesScrollRef.value.scrollTop = 0;
+      sourcesScrollTop.value = 0;
+    }
   } catch (e) {
     sources.value = [];
+    sourcesNextCursor.value = "";
+    sourcesHasMore.value = false;
     Toast.warning(e instanceof Error ? e.message : "读取站点列表失败");
   } finally {
     sourceLoading.value = false;
+  }
+}
+
+async function loadMoreSources() {
+  if (sourceLoading.value || sourceLoadingMore.value || !sourcesHasMore.value || !sourcesNextCursor.value) {
+    return;
+  }
+  sourceLoadingMore.value = true;
+  try {
+    const response = await fetchNewsDiscover({ size: SOURCE_LIMIT, cursor: sourcesNextCursor.value });
+    const more = Array.isArray(response.items) ? response.items : [];
+    const seen = new Set(sources.value.map((s) => s.sourceId));
+    const appended: NewsDiscoverItem[] = [];
+    for (const item of more) {
+      const id = String(item.sourceId || "").trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      appended.push(item);
+    }
+    if (appended.length) {
+      sources.value.push(...appended);
+    }
+    sourcesNextCursor.value = String(response.nextCursor || "").trim();
+    sourcesHasMore.value = Boolean(response.hasMore) && sourcesNextCursor.value !== "";
+  } catch (e) {
+    Toast.warning(e instanceof Error ? e.message : "加载更多站点失败");
+    sourcesHasMore.value = false;
+  } finally {
+    sourceLoadingMore.value = false;
+  }
+}
+
+const sourcesWindow = computed(() => {
+  const total = sources.value.length;
+  if (total === 0 || sourcesViewportH.value === 0) {
+    return { start: 0, end: Math.min(total, 20), offsetY: 0 };
+  }
+  const start = Math.max(0, Math.floor(sourcesScrollTop.value / SOURCE_ROW_HEIGHT) - SOURCE_OVERSCAN);
+  const visibleCount = Math.ceil(sourcesViewportH.value / SOURCE_ROW_HEIGHT) + SOURCE_OVERSCAN * 2;
+  const end = Math.min(total, start + visibleCount);
+  return { start, end, offsetY: start * SOURCE_ROW_HEIGHT };
+});
+
+const visibleSources = computed(() =>
+  sources.value.slice(sourcesWindow.value.start, sourcesWindow.value.end)
+);
+
+function onSourcesScroll(event: Event) {
+  const el = event.currentTarget as HTMLElement;
+  sourcesScrollTop.value = el.scrollTop;
+  if (
+    sourcesHasMore.value &&
+    !sourceLoading.value &&
+    !sourceLoadingMore.value &&
+    el.scrollHeight - el.scrollTop - el.clientHeight < el.clientHeight * 2
+  ) {
+    void loadMoreSources();
   }
 }
 
@@ -303,11 +366,22 @@ function setupLoadMoreObserver() {
 
 onMounted(() => {
   scrollWrapEl = scrollWrapRef.value;
+  if (sourcesScrollRef.value) {
+    sourcesViewportH.value = sourcesScrollRef.value.clientHeight;
+  }
+  window.addEventListener("resize", measureSourcesViewport);
   void reloadSources();
   void reloadItems();
 });
 
+function measureSourcesViewport() {
+  if (sourcesScrollRef.value) {
+    sourcesViewportH.value = sourcesScrollRef.value.clientHeight;
+  }
+}
+
 onBeforeUnmount(() => {
+  window.removeEventListener("resize", measureSourcesViewport);
   if (scrollEndTimer) {
     clearTimeout(scrollEndTimer);
     scrollEndTimer = null;
@@ -322,12 +396,7 @@ onBeforeUnmount(() => {
   }
 });
 
-// 哨兵元素仅在 hasMore && items.length > 0 时渲染，
-// 重建 observer 的时机严格限制为：
-//   - sentinel DOM 节点首次出现 / 被销毁；
-//   - hasMore 由 false 变 true（重新装载、重新查询）。
-// 不再监听 items.length，避免 append 后 observer 重新挂载时
-// 立刻派发一次 isIntersecting=true 触发"二连发"加载。
+
 watch(
   [hasMore, loadMoreSentinelRef],
   async () => {
@@ -376,7 +445,7 @@ watch(
         <svg viewBox="0 0 24 24" fill="none" width="16" height="16"><path d="M4 11a9 9 0 0 1 9 9" stroke="currentColor" stroke-width="2" stroke-linecap="round" /><path d="M4 4a16 16 0 0 1 16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" /><circle cx="5" cy="19" r="1.6" fill="currentColor" /></svg>
         <span>RSS 列表</span>
       </div>
-      <div class="news-sidebar-scroll">
+      <div class="news-sidebar-fixed">
         <button
           type="button"
           class="news-source-item news-source-item--readlater"
@@ -419,30 +488,48 @@ watch(
             <div class="news-source-sub">{{ refreshedAt ? formatTime(refreshedAt) : '' }}</div>
           </div>
         </button>
+      </div>
 
+      <div ref="sourcesScrollRef" class="news-sidebar-scroll" @scroll="onSourcesScroll">
         <div v-if="sourceLoading && sources.length === 0" class="news-sidebar-loading">
           <span class="uv-loader-text">loading</span>
         </div>
 
-        <button
-          v-for="source in sources"
-          :key="source.sourceId"
-          type="button"
-          class="news-source-item"
-          :class="{ active: selectedSourceId === source.sourceId }"
-          @click="selectSource(source.sourceId)"
+        <div
+          v-else
+          class="news-sources-virtual"
+          :style="{ height: sources.length * SOURCE_ROW_HEIGHT + 'px' }"
         >
-          <img
-            class="news-source-avatar"
-            :src="source.blogLogo || DEFAULT_AVATAR_DATA_URI"
-            alt=""
-            @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI"
-          />
-          <div class="news-source-meta">
-            <div class="news-source-name">{{ source.blogTitle || source.blogUrl }}</div>
-            <div class="news-source-sub">{{ source.latestPublishedAt ? formatTime(source.latestPublishedAt) : '未提供发布时间' }}</div>
+          <div
+            class="news-sources-window"
+            :style="{ transform: 'translateY(' + sourcesWindow.offsetY + 'px)' }"
+          >
+            <button
+              v-for="source in visibleSources"
+              :key="source.sourceId"
+              type="button"
+              class="news-source-item news-source-item--virtual"
+              :class="{ active: selectedSourceId === source.sourceId }"
+              @click="selectSource(source.sourceId)"
+            >
+              <img
+                class="news-source-avatar"
+                :src="source.blogLogo || DEFAULT_AVATAR_DATA_URI"
+                alt=""
+                loading="lazy"
+                @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI"
+              />
+              <div class="news-source-meta">
+                <div class="news-source-name">{{ source.blogTitle || source.blogUrl }}</div>
+                <div class="news-source-sub">{{ source.latestPublishedAt ? formatTime(source.latestPublishedAt) : '未提供发布时间' }}</div>
+              </div>
+            </button>
           </div>
-        </button>
+        </div>
+
+        <div v-if="sourceLoadingMore" class="news-sidebar-loading">
+          <span class="uv-loader-text">loading</span>
+        </div>
       </div>
     </aside>
 
@@ -574,6 +661,10 @@ watch(
 .news-sidebar-count{display:inline-flex;align-items:center;height:18px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:600;color:#0369a1;background:#e0f2fe}
 .news-sidebar-scroll{flex:1;min-height:0;overflow-y:auto;padding:0 10px 10px;display:flex;flex-direction:column;gap:8px;scrollbar-width:none;-ms-overflow-style:none}
 .news-sidebar-scroll::-webkit-scrollbar{display:none}
+.news-sidebar-fixed{padding:0 10px;display:flex;flex-direction:column;gap:8px;margin-bottom:8px}
+.news-sources-virtual{position:relative;width:100%}
+.news-sources-window{position:absolute;top:0;left:0;right:0;display:flex;flex-direction:column;gap:8px}
+.news-source-item--virtual{height:56px}
 .news-sidebar-loading{padding:14px;text-align:center;color:#94a3b8;font-size:11px}
 .news-source-item{display:flex;align-items:center;gap:12px;width:100%;padding:10px 14px;border:1px solid rgba(0,0,0,.06);background:#fff;cursor:pointer;border-radius:14px;text-align:left;color:#0f172a;box-shadow:0 1px 4px rgba(15,23,42,.04);transition:background .15s,border-color .15s}
 .news-source-item:hover{background:#f8fafc;border-color:rgba(14,165,233,.2)}

@@ -138,7 +138,8 @@ public class AstraHubCollectionService {
                 readLinkRssURL(link),
                 readLinkPriority(link),
                 groupIds,
-                readCreatedAt(link)
+                readCreatedAt(link),
+                readLinkPeerSiteId(link)
             );
             linkSnapshots.add(snapshot);
         }
@@ -249,6 +250,13 @@ public class AstraHubCollectionService {
         return trim(link.getMetadata().getAnnotations().get("rss_url"));
     }
 
+    private static String readLinkPeerSiteId(Link link) {
+        if (link == null || link.getMetadata() == null || link.getMetadata().getAnnotations() == null) {
+            return "";
+        }
+        return trim(link.getMetadata().getAnnotations().get("astrahub.io/peer-site-id"));
+    }
+
     private static String readCreatedAt(Link link) {
         if (link == null || link.getMetadata() == null || link.getMetadata().getCreationTimestamp() == null) {
             return "";
@@ -292,7 +300,8 @@ public class AstraHubCollectionService {
         String rssUrl,
         int priority,
         List<String> groupExternalIds,
-        String createdAt
+        String createdAt,
+        String peerSiteId
     ) {
     }
 }

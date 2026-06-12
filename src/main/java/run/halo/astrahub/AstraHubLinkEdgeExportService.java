@@ -44,6 +44,7 @@ public class AstraHubLinkEdgeExportService {
         List<LinkEdgeItem> edges = collected.links().stream()
             .map(link -> new LinkEdgeItem(
                 link.url(),
+                link.peerSiteId(),
                 link.title(),
                 link.description(),
                 link.logo(),
@@ -144,6 +145,7 @@ public class AstraHubLinkEdgeExportService {
 
     public record LinkEdgeItem(
         String targetUrl,
+        String targetSiteId,
         String title,
         String description,
         String logo,

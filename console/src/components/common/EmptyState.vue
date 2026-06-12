@@ -2,7 +2,6 @@
 defineProps<{
   text?: string;
   hint?: string;
-  /** 是否包虚线框容器；默认 false（与其它空态页面一致，无边框）。 */
   framed?: boolean;
 }>();
 </script>
@@ -27,7 +26,6 @@ defineProps<{
 .sp-empty-state-icon{opacity:.4}
 .sp-empty-state-text{font-size:14px;font-weight:600;color:#64748b}
 .sp-empty-state-hint{font-size:12px;color:#94a3b8}
-/* 可选虚线框包装（framed=true 时启用） */
 .sp-empty-state--framed{
   background:rgba(255,255,255,.6);
   border:1px dashed #cbd5e1;

@@ -13,6 +13,7 @@ import run.halo.app.extension.Metadata;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.app.extension.Unstructured;
 import run.halo.astrahub.model.Link;
+import run.halo.astrahub.model.LinkGroup;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -49,29 +50,45 @@ public class AstraHubFriendLinkReconcileService {
                     }
                 }
 
-                Link link = new Link();
-                link.setMetadata(new Metadata());
-                link.getMetadata().setGenerateName("link-");
-                link.getMetadata().setAnnotations(buildAnnotations(invitation, peer));
+                return resolveLocalGroupName(trim(invitation.linkGroupName()))
+                    .flatMap(resolvedGroupName -> {
+                        Link link = new Link();
+                        link.setMetadata(new Metadata());
+                        link.getMetadata().setGenerateName("link-");
+                        link.getMetadata().setAnnotations(buildAnnotations(invitation, peer));
 
-                Link.LinkSpec spec = new Link.LinkSpec();
-                spec.setUrl(peerSiteUrl);
-                spec.setDisplayName(firstNonEmpty(peer.siteName(), peerSiteUrl));
-                spec.setDescription(trim(peer.description()));
-                spec.setLogo(trim(peer.avatarUrl()));
-                spec.setPriority(0);
-                // Empty groupName must be null so the official LinkFinder routes it to UNGROUPED
-                // instead of dropping it into an unknown-group bucket.
-                String groupName = trim(invitation.linkGroupName());
-                spec.setGroupName(groupName.isEmpty() ? null : groupName);
-                link.setSpec(spec);
+                        Link.LinkSpec spec = new Link.LinkSpec();
+                        spec.setUrl(peerSiteUrl);
+                        spec.setDisplayName(firstNonEmpty(peer.siteName(), peerSiteUrl));
+                        spec.setDescription(trim(peer.description()));
+                        spec.setLogo(trim(peer.avatarUrl()));
+                        spec.setPriority(0);
+                        spec.setGroupName(resolvedGroupName.isEmpty() ? null : resolvedGroupName);
+                        link.setSpec(spec);
 
-                return createByUnstructured(link)
-                    .map(created -> ReconcileResult.created(inviteId, peerSiteId, peerSiteUrl, trim(created.getMetadata() == null ? null : created.getMetadata().getName())))
-                    .onErrorResume(error -> {
-                        log.warn("[AstraHub] create local link failed", error);
-                        return Mono.just(ReconcileResult.failed("create local link failed: " + error.getMessage()));
+                        return createByUnstructured(link)
+                            .map(created -> ReconcileResult.created(inviteId, peerSiteId, peerSiteUrl, trim(created.getMetadata() == null ? null : created.getMetadata().getName())))
+                            .onErrorResume(error -> {
+                                log.warn("[AstraHub] create local link failed", error);
+                                return Mono.just(ReconcileResult.failed("create local link failed: " + error.getMessage()));
+                            });
                     });
+            });
+    }
+
+    /**
+     * 校验 groupName 是否真实存在于本站 LinkGroup。
+     */
+    private Mono<String> resolveLocalGroupName(String groupName) {
+        if (groupName.isEmpty()) {
+            return Mono.just("");
+        }
+        return client.fetch(LinkGroup.class, groupName)
+            .map(group -> groupName)
+            .defaultIfEmpty("")
+            .onErrorResume(error -> {
+                log.warn("[AstraHub] resolve local link group failed, fallback to ungrouped", error);
+                return Mono.just("");
             });
     }
 
@@ -131,6 +148,81 @@ public class AstraHubFriendLinkReconcileService {
     }
 
     /**
+     * 站点 A 在 Hub 更新资料后，Hub 通过 ws 广播 site_profile_updated。
+     */
+    public Mono<LocalLinkUpdateResult> updateLocalLinkByPeerSiteId(
+        String peerSiteId, String name, String url, String description, String logo, String rssUrl
+    ) {
+        String normalizedPeerSiteId = trim(peerSiteId);
+        if (normalizedPeerSiteId.isEmpty()) {
+            return Mono.just(LocalLinkUpdateResult.failed("peerSiteId is required"));
+        }
+        return client.listAll(Link.class, new ListOptions(), Sort.unsorted())
+            .filter(link -> normalizedPeerSiteId.equals(annotation(link, "astrahub.io/peer-site-id")))
+            .map(link -> trim(link.getMetadata() == null ? null : link.getMetadata().getName()))
+            .filter(metaName -> !metaName.isEmpty())
+            .collectList()
+            .flatMap(names -> {
+                if (names.isEmpty()) {
+                    return Mono.just(LocalLinkUpdateResult.notFound(normalizedPeerSiteId));
+                }
+                return reactor.core.publisher.Flux.fromIterable(names)
+                    .flatMap(metaName -> updateLinkByNameWithRetry(metaName, name, url, description, logo, rssUrl))
+                    .then(Mono.just(LocalLinkUpdateResult.updated(names.size(), normalizedPeerSiteId)));
+            })
+            .onErrorResume(error -> {
+                log.warn("[AstraHub] update local link by peer site id failed", error);
+                return Mono.just(LocalLinkUpdateResult.failed("update local link failed: " + error.getMessage()));
+            });
+    }
+
+    /**
+     * Fetch-mutate-update one Link by metadata.name, retrying on optimistic lock.
+     * Overwrites identity fields with the hub's authoritative profile.
+     */
+    private Mono<Void> updateLinkByNameWithRetry(
+        String metaName, String name, String url, String description, String logo, String rssUrl
+    ) {
+        return client.fetch(Link.class, metaName)
+            .flatMap(latest -> {
+                if (latest.getSpec() == null) {
+                    latest.setSpec(new Link.LinkSpec());
+                }
+                String resolvedUrl = trim(url);
+                latest.getSpec().setDisplayName(firstNonEmpty(name, resolvedUrl));
+                if (!resolvedUrl.isEmpty()) {
+                    latest.getSpec().setUrl(resolvedUrl);
+                }
+                latest.getSpec().setDescription(trim(description));
+                latest.getSpec().setLogo(trim(logo));
+                if (latest.getMetadata().getAnnotations() == null) {
+                    latest.getMetadata().setAnnotations(new LinkedHashMap<>());
+                }
+                Map<String, String> annotations = latest.getMetadata().getAnnotations();
+                if (!resolvedUrl.isEmpty()) {
+                    annotations.put("astrahub.io/peer-site-url", resolvedUrl);
+                }
+                String resolvedRss = trim(rssUrl);
+                annotations.put("rss_url", resolvedRss);
+                annotations.put("astrahub.io/peer-rss-url", resolvedRss);
+
+                Map<?, ?> extensionMap = OBJECT_MAPPER.convertValue(latest, Map.class);
+                var extension = new Unstructured(extensionMap);
+                return client.update(extension).then();
+            })
+            .retryWhen(Retry.backoff(5, Duration.ofMillis(100))
+                .filter(OptimisticLockingFailureException.class::isInstance))
+            .then();
+    }
+
+    private static String annotation(Link link, String key) {
+        if (link == null || link.getMetadata() == null || link.getMetadata().getAnnotations() == null) {
+            return "";
+        }
+        return trim(link.getMetadata().getAnnotations().get(key));
+    }
+
+    /**
      * Idempotently deletes the local Halo Link CR pointing at the given peer URL.
      * Used after a friend relation is removed on the hub.
      */
@@ -180,6 +272,26 @@ public class AstraHubFriendLinkReconcileService {
                     .flatMap(stillThere -> Mono.<Void>error(error))
                     .switchIfEmpty(Mono.empty())
             );
+    }
+
+    public record LocalLinkUpdateResult(
+        boolean success,
+        int updated,
+        String peerSiteId,
+        String message
+    ) {
+        public static LocalLinkUpdateResult updated(int count, String peerSiteId) {
+            return new LocalLinkUpdateResult(true, count, peerSiteId, "updated");
+        }
+
+        public static LocalLinkUpdateResult notFound(String peerSiteId) {
+            // 没找到也算成功（幂等：旧数据无 annotation 或用户已手删，重复触发不报错）。
+            return new LocalLinkUpdateResult(true, 0, peerSiteId, "not_found");
+        }
+
+        public static LocalLinkUpdateResult failed(String message) {
+            return new LocalLinkUpdateResult(false, 0, "", message);
+        }
     }
 
     public record LocalLinkDeleteResult(

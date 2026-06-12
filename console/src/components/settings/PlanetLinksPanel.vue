@@ -23,13 +23,15 @@ const props = defineProps<{
   activeFilter?: "all" | "mutual" | "following" | "pendingBack" | "favorites";
   searchQuery?: string;
   persistSettings?: (options?: SaveSettingsOptions) => Promise<boolean>;
-  // 父组件 AstraHubView 持有 WS 单例，把事件通过 prop 透传过来。
-  // 本组件按事件类型就地翻面卡片状态，避免重复连 WS，也不依赖 Hub 物化表 5s tick 的延迟。
   realtimeEvent?: HubRealtimeEvent<unknown> | null;
 }>();
 
-// 浮层最多渲染的条目数，超出用"还有 N 个…"省略，避免站点/标签上千条时全量渲染卡顿。
+
 const OVERFLOW_POPOVER_MAX = 20;
+
+const ROW_HEIGHT = 76; // 行步进（卡片高 + 行间距）
+const ROW_GAP = 8; // 行间距
+const OVERSCAN = 6; // 可视区上下缓冲行数
 
 const DEFAULT_AVATAR_DATA_URI = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path d="M512 512m-512 0a512 512 0 1 0 1024 0 512 512 0 1 0-1024 0Z" fill="#1A4066"/><path d="M675.623007 719.427534H348.369612a169.86709 169.86709 0 0 0-169.859709 169.867089v11.026784a511.431685 511.431685 0 0 0 666.965432 0v-11.026784a169.86709 169.86709 0 0 0-169.852328-169.867089zM786.783912 461.892345a273.602998 273.602998 0 0 1-74.323771 187.912931H311.539859a274.776532 274.776532 0 1 1 475.244053-187.912931z" fill="#CBD5D8"/><path d="M727.738215 477.731354a215.125616 215.125616 0 0 1-48.631512 136.484128H344.9302A215.716073 215.716073 0 1 1 727.738215 477.731354z" fill="#0E243A"/><path d="M755.342079 684.612714a34.726251 34.726251 0 0 1-10.332997 24.629437 35.737408 35.737408 0 0 1-24.97633 10.185383H303.959867a35.110048 35.110048 0 0 1-35.375753-34.81482 34.549113 34.549113 0 0 1 10.406804-24.629436 35.641459 35.641459 0 0 1 24.97633-10.178002h416.072885a35.043621 35.043621 0 0 1 35.301946 34.807438z" fill="#AD382B"/><path d="M398.624881 487.761741l-51.664985-0.915208a218.779069 218.779069 0 0 1 1.476143-22.28237l51.288568 6.192418a188.222921 188.222921 0 0 0-1.099726 17.00516zM403.437105 451.699582L353.536111 438.244544a149.090385 149.090385 0 0 1 102.673086-106.666052l11.978896 50.26265-5.993138-25.131325 6.214559 25.094421a97.587776 97.587776 0 0 0-64.972409 69.895344z" fill="#CBD5D8"/><path d="M383.58299 780.554591m15.02713 0l226.77238 0q15.02713 0 15.02713 15.02713l0 119.973476q0 15.02713-15.02713 15.02713l-226.77238 0q-15.02713 0-15.02713-15.02713l0-119.973476q0-15.02713 15.02713-15.02713Z" fill="#F7F7F7"/><path d="M449.92083 855.572149m-36.822372 0a36.822373 36.822373 0 1 0 73.644745 0 36.822373 36.822373 0 1 0-73.644745 0Z" fill="#D8D8D8"/><path d="M449.92083 855.572149m-22.511172 0a22.511172 22.511172 0 1 0 45.022344 0 22.511172 22.511172 0 1 0-45.022344 0Z" fill="#C6817B"/></svg>`)}`;
 
@@ -42,7 +44,8 @@ const {
   hasMore,
   fetchLinks,
   loadMore,
-  markOutboxActive
+  markOutboxActive,
+  setQuery
 } = usePlanetLinksLocal();
 
 let favSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -70,22 +73,18 @@ function debounceSaveFavorites() {
 }
 
 const orderedItems = computed(() => {
-  // 顺序完全由服务端统一流（relationRankOf 关系阶段置顶 + 游标分页）决定，
-  // 前端不再本地重排，只把"收藏"作为唯一的展示置顶偏好叠加在服务端顺序之上。
-  // 这样关系卡片首屏即在最前，无需等全部加载完，从根上消除"滑到底才排到前面"。
-  return items.value
-    .map((item, index) => ({
-      item,
-      index,
-      favRank: isFavorite(item) ? 0 : 1
-    }))
-    .sort((left, right) => {
-      if (left.favRank !== right.favRank) {
-        return left.favRank - right.favRank;
-      }
-      return left.index - right.index;
-    })
-    .map(({ item }) => item);
+
+  const favorites: PlanetLinkItem[] = [];
+  const rest: PlanetLinkItem[] = [];
+  const pinned = props.settings.favorites.pinnedSiteUrls;
+  for (const item of items.value) {
+    if (pinned.includes(item.url)) {
+      favorites.push(item);
+    } else {
+      rest.push(item);
+    }
+  }
+  return favorites.length ? [...favorites, ...rest] : rest;
 });
 
 type RelationFilter = "all" | "mutual" | "following" | "pendingBack" | "favorites";
@@ -96,61 +95,71 @@ function relationKindOf(item: PlanetLinkItem) {
   return String(item.relationKind || "").trim().toLowerCase();
 }
 
-// relationStatusOf 读取服务端权威关系状态；旧数据缺失时退回 relationKind 推导，
-// 保证筛选与标签口径一致（都以 relationStatus 为准）。
-function relationStatusOf(item: PlanetLinkItem) {
-  const status = String(item.relationStatus || "").trim();
-  if (status) return status;
-  const kind = relationKindOf(item);
-  if (kind === "mutual") return "mutual";
-  if (kind === "one_way_out") return "following";
-  if (kind === "one_way_in") return "follower";
-  if (item.outboxInvitationActive) return "invite_sent";
-  return "none";
-}
-
-function isInvitablePending(item: PlanetLinkItem) {
-  return canInvite(item) && !item.outboxInvitationActive;
-}
-
 const filteredItems = computed(() => {
-  const keyword = String(props.searchQuery || "").trim().toLowerCase();
+
   return orderedItems.value.filter((item) => {
     if (isSelfLink(item)) {
       return relationFilter.value === "all";
     }
     if (relationFilter.value === "favorites") {
-      if (!isFavorite(item)) return false;
-    } else if (relationFilter.value !== "all") {
-      const status = relationStatusOf(item);
-      if (relationFilter.value === "mutual" && status !== "mutual") {
-        return false;
-      }
-      if (relationFilter.value === "following" && status !== "following") {
-        return false;
-      }
-      if (relationFilter.value === "pendingBack" && !isInvitablePending(item)) {
-        return false;
-      }
-    }
-    if (keyword) {
-      const haystack = [
-        item.title,
-        item.description,
-        item.url,
-        displayHost(item.url)
-      ]
-        .map((value) => String(value || "").toLowerCase())
-        .join(" ");
-      if (!haystack.includes(keyword)) {
-        return false;
-      }
+      return isFavorite(item);
     }
     return true;
   });
 });
 
+
+const relationParam = computed(() => {
+  switch (relationFilter.value) {
+    case "mutual":
+      return "mutual";
+    case "following":
+      return "following";
+    case "pendingBack":
+      return "pendingBack";
+    default:
+      return "";
+  }
+});
+
+
 const renderItems = computed(() => filteredItems.value.slice(0, visibleItems.value.length));
+
+// ---- 虚拟滚动窗口（固定行高） ----
+const scrollTop = ref(0);
+const viewportHeight = ref(0);
+const heroHeight = ref(0);
+
+const listSpacerHeight = computed(() => {
+  const count = renderItems.value.length;
+  if (count <= 0) {
+    return 0;
+  }
+  return Math.max(0, count * ROW_HEIGHT - ROW_GAP);
+});
+
+const visibleRange = computed(() => {
+  const count = renderItems.value.length;
+  if (count <= 0) {
+    return { start: 0, end: 0 };
+  }
+  const innerScroll = Math.max(0, scrollTop.value - heroHeight.value);
+  const rawStart = Math.floor(innerScroll / ROW_HEIGHT);
+  const start = Math.max(0, rawStart - OVERSCAN);
+  const visibleCount = Math.ceil(viewportHeight.value / ROW_HEIGHT);
+  const end = Math.min(count, rawStart + visibleCount + OVERSCAN);
+  return { start, end };
+});
+
+const windowedItems = computed(() => {
+  const { start, end } = visibleRange.value;
+  const list = renderItems.value;
+  const result: Array<{ item: PlanetLinkItem; top: number }> = [];
+  for (let i = start; i < end; i++) {
+    result.push({ item: list[i], top: i * ROW_HEIGHT });
+  }
+  return result;
+});
 
 const invitingTargets = ref<string[]>([]);
 const inviteDialogVisible = ref(false);
@@ -160,8 +169,6 @@ const inviteLinkGroupName = ref("");
 const inviteLinkGroups = ref<LinkGroupOption[]>([]);
 const inviteGroupDropdownOpen = ref(false);
 
-// 解除友链关系（"删除"按钮）相关状态。
-// removingTargets 按 targetSiteId 去重避免重复点击；removeDialog* 控制确认弹窗。
 const removingTargets = ref<string[]>([]);
 const removeDialogVisible = ref(false);
 const removeTarget = ref<PlanetLinkItem | null>(null);
@@ -181,6 +188,8 @@ const SIMPLE_STATUS_MAP = {
 } as const;
 
 async function reload(options?: { silent?: boolean }) {
+
+  setQuery({ keyword: props.searchQuery || "", relation: relationParam.value });
   await fetchLinks(options);
 }
 
@@ -338,9 +347,7 @@ function invitationStateTone(invitationState: string) {
 }
 
 function relationSummary(item: PlanetLinkItem) {
-  // 权威关系状态完全由服务端 relationStatus 给定，前端只做「枚举 → 文案/色调」映射，
-  // 绝不再用 targetRegistered / relationKind 自行推断（历史 bug：未接入插件的已关注
-  // 站点被错标成"暂未接入"）。relationStatus 与服务端排序档位同源，标签与位置永远一致。
+
   const status = String(item.relationStatus || "").trim();
   switch (status) {
     case "self":
@@ -356,14 +363,13 @@ function relationSummary(item: PlanetLinkItem) {
     case "invitable":
       return { text: SIMPLE_STATUS_MAP.relation.invitable, tone: "muted" };
     case "none":
-      // 服务端明确判定无关系：已接入的显示"没有关系"，未接入的显示"暂未接入"。
+
       return item.targetRegistered
         ? { text: SIMPLE_STATUS_MAP.relation.none, tone: "muted" }
         : { text: SIMPLE_STATUS_MAP.relation.unknown, tone: "muted" };
   }
 
-  // 兼容兜底：服务端未返回 relationStatus（旧版本）时，退回基于 relationKind 的判定，
-  // 但已修正优先级——先认关系，再认是否接入，避免已关注站点被误标"暂未接入"。
+
   const relationKind = relationKindOf(item);
   if (relationKind === "mutual") {
     return { text: SIMPLE_STATUS_MAP.relation.mutual, tone: "mutual" };
@@ -541,10 +547,7 @@ async function submitInvite() {
   }
 }
 
-// 是否允许对该卡片显示"删除"按钮。
-// 与按钮显示"已加"对齐：对方已接入插件、可以接受邀请、当前已成边（mutual 或 single-direction following+registered）。
-// 注意：following 但对方未接入（registered=false）这种情形按钮文案是"尚未注册"，
-// 不会显示"已加"，自然也不显示删除按钮——这与 inviteButtonText 的判定保持同步。
+// 是否允许对该卡片显示"删除"按钮。与"已加"对齐：对方已接入、可接受邀请、当前已成边。
 function canRemoveRelation(item: PlanetLinkItem) {
   if (isSelfLink(item)) {
     return false;
@@ -602,17 +605,12 @@ async function submitRemove() {
     if (result.removed) {
       Toast.success("已解除友链关系");
     } else {
-      // Hub 边本就不存在（理论上 hasLocalLink 校验过不该进入这里，但接口幂等返回成功）。
       Toast.success("关系已解除（无变化）");
     }
-    // 成功后直接重置弹窗状态——不能走 closeRemoveDialog()，因为它守卫 isRemoving 仍为 true 时
-    // 会拒绝关闭（removingTargets 要等 finally 才清空）。
     removeDialogVisible.value = false;
     removeTarget.value = null;
     removeReason.value = "";
-    // 不做乐观本地翻面：服务端 /v1/planet/links 是关系状态唯一真相源。
-    // 这次 reload 与稍后到达的 WS 事件触发的 reload 都被 scheduleSilentReload 的 500ms
-    // 防抖合并成一次实际 HTTP 拉取，UI 状态以服务端结果为准。
+
     scheduleSilentReload();
   } catch (e) {
     Toast.error(e instanceof Error ? e.message : "解除友链关系失败");
@@ -641,6 +639,15 @@ function onScroll(event: Event) {
     return;
   }
 
+  // 虚拟滚动：滚动位置更新后 computed 重算渲染窗口。
+  scrollTop.value = target.scrollTop;
+  if (viewportHeight.value !== target.clientHeight) {
+    viewportHeight.value = target.clientHeight;
+  }
+  if (heroEl.value) {
+    heroHeight.value = heroEl.value.offsetHeight;
+  }
+
   if (loading.value || loadingMore.value || !hasMore.value) {
     return;
   }
@@ -648,6 +655,21 @@ function onScroll(event: Event) {
   if (distanceToBottom < 80) {
     void loadMore();
   }
+}
+
+function measureViewport() {
+  const wrap = scrollWrapEl.value;
+  if (wrap) {
+    viewportHeight.value = wrap.clientHeight;
+    scrollTop.value = wrap.scrollTop;
+  }
+  if (heroEl.value) {
+    heroHeight.value = heroEl.value.offsetHeight;
+  }
+}
+
+function onViewportResize() {
+  measureViewport();
 }
 
 function handleDocumentClick(event: MouseEvent) {
@@ -660,18 +682,22 @@ function handleDocumentClick(event: MouseEvent) {
   }
 }
 
+let resizeObserver: ResizeObserver | null = null;
+
 onMounted(() => {
   void reload();
   document.addEventListener("click", handleDocumentClick);
+  window.addEventListener("resize", onViewportResize);
+
+  const wrap = scrollWrapEl.value;
+  if (wrap && typeof ResizeObserver !== "undefined") {
+    resizeObserver = new ResizeObserver(() => onViewportResize());
+    resizeObserver.observe(wrap);
+  }
+  requestAnimationFrame(measureViewport);
 });
 
-// 父组件 AstraHubView 单例 WS 收到事件后，原样透传到这里。
-// 处理策略（精确版）：所有事件统一走 silent reload，让服务端 /v1/planet/links 是
-// 唯一真相源。不再做任何"乐观本地翻面"——历史经验表明本地推断与 Hub 实际边表
-// 状态可能不一致（典型例子：从 mutual 删除时本地推断 none，但服务端权威是 follower），
-// 一旦不一致用户就能看到 UI 闪烁。
-// 多个 WS 事件 + HTTP 成功回调可能在同一窗口内连发，scheduleSilentReload 用 500ms
-// 防抖把它们合并成一次实际拉取，避免打抖动 Hub。
+
 let realtimeReloadTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleSilentReload() {
   if (realtimeReloadTimer) {
@@ -688,7 +714,7 @@ function applyRealtimeEvent(event: HubRealtimeEvent<unknown>) {
   if (!myId) {
     return;
   }
-  // friend_relation_removed: 解除关系，actor + peer 双方都需要刷新卡片。
+ 
   if (event.type === "friend_relation_removed") {
     const data = (event.data || {}) as {
       actorSiteId?: string;
@@ -702,8 +728,7 @@ function applyRealtimeEvent(event: HubRealtimeEvent<unknown>) {
     scheduleSilentReload();
     return;
   }
-  // site_relation_updated: 涵盖审核通过 + 解除关系两类触发。无论 trigger 是什么，
-  // 只要本站点被波及（sourceSiteId 或 impactedSiteIds 包含 myId）就刷新。
+
   if (event.type === "site_relation_updated") {
     const data = (event.data || {}) as HubSiteRelationUpdatedPayload;
     const sourceId = String(data.sourceSiteId || "").trim();
@@ -723,8 +748,7 @@ function applyRealtimeEvent(event: HubRealtimeEvent<unknown>) {
     scheduleSilentReload();
     return;
   }
-  // 友链邀请类事件：data 是 FriendInvitationItem，按 fromSite/toSite 路由。
-  // 仅当本站点是双方之一时才刷新，避免无关事件触发不必要的拉取。
+ 
   const invitation = event.data as FriendInvitationItem | undefined;
   if (!invitation) return;
   const fromSiteId = String(invitation.fromSite?.siteId || "").trim();
@@ -746,6 +770,11 @@ watch(
 
 onBeforeUnmount(() => {
   document.removeEventListener("click", handleDocumentClick);
+  window.removeEventListener("resize", onViewportResize);
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
   if (scrollEndTimer) {
     clearTimeout(scrollEndTimer);
     scrollEndTimer = null;
@@ -754,7 +783,21 @@ onBeforeUnmount(() => {
     clearTimeout(realtimeReloadTimer);
     realtimeReloadTimer = null;
   }
+  if (searchReloadTimer) {
+    clearTimeout(searchReloadTimer);
+    searchReloadTimer = null;
+  }
 });
+
+watch(
+  () => loading.value,
+  (isLoading) => {
+
+    if (!isLoading) {
+      requestAnimationFrame(measureViewport);
+    }
+  }
+);
 
 watch(
   () => props.settings.connection.hubBaseUrl,
@@ -773,12 +816,28 @@ watch(
 watch(
   () => props.activeFilter,
   () => {
+
+    void reload();
     const wrap = scrollWrapEl.value;
     const hero = heroEl.value;
     if (!wrap || !hero) {
       return;
     }
     wrap.scrollTo({ top: hero.offsetHeight, behavior: "smooth" });
+  }
+);
+
+let searchReloadTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  () => props.searchQuery,
+  () => {
+    if (searchReloadTimer) {
+      clearTimeout(searchReloadTimer);
+    }
+    searchReloadTimer = setTimeout(() => {
+      searchReloadTimer = null;
+      void reload();
+    }, 300);
   }
 );
 </script>
@@ -829,15 +888,26 @@ watch(
             <EmptyState text="暂无可展示的友链数据" hint="接入星链并完成同步后，友链数据将在此展示" />
           </div>
 
-            <template v-for="item in renderItems" :key="item.url">
+          <!-- 虚拟滚动容器：占位层撑总高 + 仅渲染可视窗口内的行（绝对定位）。 -->
+          <div
+            v-else
+            class="planet-links-virtual"
+            :style="{ height: listSpacerHeight + 'px' }"
+          >
+            <div
+              v-for="row in windowedItems"
+              :key="row.item.url"
+              class="planet-links-vrow"
+              :style="{ transform: `translateY(${row.top}px)` }"
+            >
               <!-- 本站卡片：独特样式，不展示状态信息和邀请按钮 -->
-              <div v-if="isSelfLink(item)" class="planet-links-self-card">
+              <div v-if="isSelfLink(row.item)" class="planet-links-self-card">
                 <span class="self-card-corner">本站</span>
                 <div class="self-card-inner">
                   <div class="self-card-avatar">
                     <img
-                      v-if="item.logo"
-                      :src="item.logo"
+                      v-if="row.item.logo"
+                      :src="row.item.logo"
                       alt=""
                       class="self-card-logo"
                       @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI"
@@ -845,8 +915,8 @@ watch(
                     <img v-else :src="DEFAULT_AVATAR_DATA_URI" alt="" class="self-card-logo" />
                   </div>
                   <div class="self-card-main">
-                    <div class="self-card-title">{{ item.title || item.url }}</div>
-                    <div class="self-card-desc">{{ item.description || "暂无简介" }}</div>
+                    <div class="self-card-title">{{ row.item.title || row.item.url }}</div>
+                    <div class="self-card-desc">{{ row.item.description || "暂无简介" }}</div>
                   </div>
                   <div class="self-card-meta-block">
                     <span class="self-card-meta-item self-card-meta-host">
@@ -854,14 +924,14 @@ watch(
                         <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6" />
                         <path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
                       </svg>
-                      {{ displayHost(item.url) }}
+                      {{ displayHost(row.item.url) }}
                     </span>
                     <span class="self-card-meta-item">
                       <svg viewBox="0 0 24 24" fill="none" class="self-card-meta-icon">
                         <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6" />
                         <path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
                       </svg>
-                      {{ formatUpdatedAt(item.updatedAt) }}
+                      {{ formatUpdatedAt(row.item.updatedAt) }}
                     </span>
                   </div>
                 </div>
@@ -871,130 +941,131 @@ watch(
               <div
                 v-else
                 class="planet-links-row"
-                :class="`planet-links-row--${inviteButtonTone(item)}`"
+                :class="`planet-links-row--${inviteButtonTone(row.item)}`"
               >
                 <div class="link-main">
-                  <img v-if="item.logo" :src="item.logo" alt="" class="link-logo" @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI" />
+                  <img v-if="row.item.logo" :src="row.item.logo" alt="" class="link-logo" @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI" />
                   <div v-else class="link-logo link-logo-fallback">
                     <img :src="DEFAULT_AVATAR_DATA_URI" alt="" class="link-logo" />
                   </div>
                   <div class="link-main-text">
                     <div class="link-title-row">
-                      <div class="link-title">{{ item.title || item.url }}</div>
+                      <div class="link-title">{{ row.item.title || row.item.url }}</div>
                     </div>
-                    <div class="link-desc">{{ item.description || "暂无简介" }}</div>
+                    <div class="link-desc">{{ row.item.description || "暂无简介" }}</div>
                   </div>
                 </div>
 
                 <div class="site-name">
                   <span
-                    v-for="name in visibleSourceSiteNames(item)"
+                    v-for="name in visibleSourceSiteNames(row.item)"
                     :key="name"
                     class="source-site-pill"
                   >{{ name }}</span>
                   <span
-                    v-if="sourceSiteOverflow(item) > 0"
+                    v-if="sourceSiteOverflow(row.item) > 0"
                     class="overflow-badge overflow-badge--site"
                     tabindex="0"
-                    :aria-label="`所属站点：${sourceSiteTooltip(item)}`"
+                    :aria-label="`所属站点：${sourceSiteTooltip(row.item)}`"
                   >
-                    +{{ sourceSiteOverflow(item) }}
+                    +{{ sourceSiteOverflow(row.item) }}
                     <span class="overflow-popover">
                       <span
-                        v-for="sourceName in sourceSiteNames(item).slice(0, OVERFLOW_POPOVER_MAX)"
+                        v-for="sourceName in sourceSiteNames(row.item).slice(0, OVERFLOW_POPOVER_MAX)"
                         :key="sourceName"
                         class="overflow-popover-entry"
                       >
                         {{ sourceName }}
                       </span>
                       <span
-                        v-if="sourceSiteNames(item).length > OVERFLOW_POPOVER_MAX"
+                        v-if="sourceSiteNames(row.item).length > OVERFLOW_POPOVER_MAX"
                         class="overflow-popover-entry overflow-popover-more"
                       >
-                        还有 {{ sourceSiteNames(item).length - OVERFLOW_POPOVER_MAX }} 个…
+                        还有 {{ sourceSiteNames(row.item).length - OVERFLOW_POPOVER_MAX }} 个…
                       </span>
                     </span>
                   </span>
-                  <span v-if="!sourceSiteNames(item).length" class="tag-empty">-</span>
+                  <span v-if="!sourceSiteNames(row.item).length" class="tag-empty">-</span>
                 </div>
 
                 <div class="relation-text">
-                  <span class="relation-pill relation-summary-pill" :class="relationSummary(item).tone">
-                    {{ relationSummary(item).text }}
+                  <span class="relation-pill relation-summary-pill" :class="relationSummary(row.item).tone">
+                    {{ relationSummary(row.item).text }}
                   </span>
                 </div>
 
-                <div class="link-url">{{ displayHost(item.url) }}</div>
+                <div class="link-url">{{ displayHost(row.item.url) }}</div>
 
-                <div class="rss-time">{{ formatUpdatedAt(item.updatedAt) }}</div>
+                <div class="rss-time">{{ formatUpdatedAt(row.item.updatedAt) }}</div>
 
                 <div class="tag-list">
                   <span
-                    v-for="tag in visibleTags(item)"
+                    v-for="tag in visibleTags(row.item)"
                     :key="tag"
                     class="tag-pill"
                   >
                     {{ tag }}
                   </span>
                   <span
-                    v-if="tagOverflow(item) > 0"
+                    v-if="tagOverflow(row.item) > 0"
                     class="overflow-badge overflow-badge--tag"
                     tabindex="0"
-                    :aria-label="`标签：${tagTooltip(item)}`"
+                    :aria-label="`标签：${tagTooltip(row.item)}`"
                   >
-                    +{{ tagOverflow(item) }}
+                    +{{ tagOverflow(row.item) }}
                     <span class="overflow-popover">
                       <span
-                        v-for="tag in (item.tags || []).slice(0, OVERFLOW_POPOVER_MAX)"
+                        v-for="tag in (row.item.tags || []).slice(0, OVERFLOW_POPOVER_MAX)"
                         :key="tag"
                         class="overflow-popover-entry"
                       >
                         {{ tag }}
                       </span>
                       <span
-                        v-if="(item.tags || []).length > OVERFLOW_POPOVER_MAX"
+                        v-if="(row.item.tags || []).length > OVERFLOW_POPOVER_MAX"
                         class="overflow-popover-entry overflow-popover-more"
                       >
-                        还有 {{ (item.tags || []).length - OVERFLOW_POPOVER_MAX }} 个…
+                        还有 {{ (row.item.tags || []).length - OVERFLOW_POPOVER_MAX }} 个…
                       </span>
                     </span>
                   </span>
-                  <span v-if="!(item.tags || []).length" class="tag-empty">-</span>
+                  <span v-if="!(row.item.tags || []).length" class="tag-empty">-</span>
                 </div>
 
                 <div class="action-cell">
                   <button
                     class="fav-btn"
-                    :class="{ 'fav-btn--active': isFavorite(item) }"
-                    :title="isFavorite(item) ? '取消收藏' : '收藏'"
-                    @click.stop="toggleFavorite(item)"
+                    :class="{ 'fav-btn--active': isFavorite(row.item) }"
+                    :title="isFavorite(row.item) ? '取消收藏' : '收藏'"
+                    @click.stop="toggleFavorite(row.item)"
                   >
-                    <svg viewBox="0 0 1024 1024" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><path d="M959.24224 401.32608c-7.36256-24.57088-28.78976-43.22304-63.6928-55.43936a15.36 15.36 0 0 0-1.3824-0.43008l-189.54752-51.4304c-41.09824-62.68416-82.25792-125.34272-123.40736-188.01664-0.17408-0.24576-0.54272-0.8192-0.7168-1.06496-19.79904-27.68896-44.48256-42.94656-69.46304-42.94656-18.06336 0-44.544 7.78752-68.38784 45.2096L337.08032 278.69184c-47.27296 14.32576-94.54592 28.71808-141.84448 43.10016L126.1056 342.81984C93.91104 353.28 73.56928 370.2016 65.64864 393.12896c-8.30976 24.0896-2.46784 52.1728 17.87904 85.87264 0.49152 0.82432 1.03424 1.60768 1.61792 2.34496a203168.54272 203168.54272 0 0 1 124.05248 157.1584c-2.11968 75.5712-4.2752 151.2192-6.47168 226.87232-3.15392 36.21888 2.08896 61.74208 16 78.0288 10.54208 12.3392 25.20064 18.59072 43.5712 18.59072 14.07488 0 30.7712-3.67616 53.2992-11.86816l182.52288-74.2912a116757.43744 116757.43744 0 0 0 207.60064 77.18912c13.62432 4.38784 26.23488 6.60992 37.49888 6.60992 25.68192 0 69.27872-11.81184 72.76544-90.96192a21.24288 21.24288 0 0 0-0.02048-2.42176c-3.81952-67.45088-7.68-134.74304-11.53536-202.08128l-0.0512-0.88576 134.43584-180.78208c20.74112-29.82912 27.61728-57.15968 20.4288-81.1776z" :fill="isFavorite(item) ? '#FCD62C' : '#d1d5db'" /><path d="M905.0112 455.04l-139.04896 186.95168a23.63904 23.63904 0 0 0-4.55168 15.43168l0.5376 9.51808c3.82976 66.90304 7.67488 133.7856 11.4688 200.8064-2.35008 46.63296-20.44416 46.63296-30.20288 46.63296-7.08096 0-15.54432-1.56672-24.31488-4.36736a142424.4224 142424.4224 0 0 1-214.05696-79.63136 20.1984 20.1984 0 0 0-14.63808 0.21504l-189.06624 76.9792c-16.9984 6.1696-29.70624 9.1648-38.8352 9.1648-8.85248 0-11.20256-2.74944-12.08832-3.77344-2.45248-2.87744-7.85408-12.90752-5.05344-44.02688 0.03584-0.4864 0.07168-0.96768 0.08704-1.4592 2.2784-78.78656 4.52608-157.55264 6.7328-236.23168a23.6032 23.6032 0 0 0-4.97152-15.21664 163892.8896 163892.8896 0 0 0-128.37376-162.66752c-11.77088-19.80928-16.2816-35.2256-13.02016-44.63616 3.82976-11.10528 20.0192-18.432 32.5632-22.50752L206.9504 365.312c49.8432-15.16544 99.62496-30.3104 149.43232-45.40928a21.36064 21.36064 0 0 0 11.96032-9.3696l109.7216-178.2272c7.27552-11.42272 18.91328-25.05216 32.98304-25.05216 11.37664 0 24.01792 8.91904 35.29216 24.6784 42.65472 64.95744 85.31456 129.90464 127.91296 194.87744a21.28896 21.28896 0 0 0 12.1856 8.98048L882.90816 389.12c20.21888 7.17312 32.91648 16.37376 35.78368 25.93792 2.7392 9.14432-2.2784 23.54176-13.68064 39.98208z" :fill="isFavorite(item) ? '#FCD62C' : '#d1d5db'" /></svg>
+                    <svg viewBox="0 0 1024 1024" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><path d="M959.24224 401.32608c-7.36256-24.57088-28.78976-43.22304-63.6928-55.43936a15.36 15.36 0 0 0-1.3824-0.43008l-189.54752-51.4304c-41.09824-62.68416-82.25792-125.34272-123.40736-188.01664-0.17408-0.24576-0.54272-0.8192-0.7168-1.06496-19.79904-27.68896-44.48256-42.94656-69.46304-42.94656-18.06336 0-44.544 7.78752-68.38784 45.2096L337.08032 278.69184c-47.27296 14.32576-94.54592 28.71808-141.84448 43.10016L126.1056 342.81984C93.91104 353.28 73.56928 370.2016 65.64864 393.12896c-8.30976 24.0896-2.46784 52.1728 17.87904 85.87264 0.49152 0.82432 1.03424 1.60768 1.61792 2.34496a203168.54272 203168.54272 0 0 1 124.05248 157.1584c-2.11968 75.5712-4.2752 151.2192-6.47168 226.87232-3.15392 36.21888 2.08896 61.74208 16 78.0288 10.54208 12.3392 25.20064 18.59072 43.5712 18.59072 14.07488 0 30.7712-3.67616 53.2992-11.86816l182.52288-74.2912a116757.43744 116757.43744 0 0 0 207.60064 77.18912c13.62432 4.38784 26.23488 6.60992 37.49888 6.60992 25.68192 0 69.27872-11.81184 72.76544-90.96192a21.24288 21.24288 0 0 0-0.02048-2.42176c-3.81952-67.45088-7.68-134.74304-11.53536-202.08128l-0.0512-0.88576 134.43584-180.78208c20.74112-29.82912 27.61728-57.15968 20.4288-81.1776z" :fill="isFavorite(row.item) ? '#FCD62C' : '#d1d5db'" /><path d="M905.0112 455.04l-139.04896 186.95168a23.63904 23.63904 0 0 0-4.55168 15.43168l0.5376 9.51808c3.82976 66.90304 7.67488 133.7856 11.4688 200.8064-2.35008 46.63296-20.44416 46.63296-30.20288 46.63296-7.08096 0-15.54432-1.56672-24.31488-4.36736a142424.4224 142424.4224 0 0 1-214.05696-79.63136 20.1984 20.1984 0 0 0-14.63808 0.21504l-189.06624 76.9792c-16.9984 6.1696-29.70624 9.1648-38.8352 9.1648-8.85248 0-11.20256-2.74944-12.08832-3.77344-2.45248-2.87744-7.85408-12.90752-5.05344-44.02688 0.03584-0.4864 0.07168-0.96768 0.08704-1.4592 2.2784-78.78656 4.52608-157.55264 6.7328-236.23168a23.6032 23.6032 0 0 0-4.97152-15.21664 163892.8896 163892.8896 0 0 0-128.37376-162.66752c-11.77088-19.80928-16.2816-35.2256-13.02016-44.63616 3.82976-11.10528 20.0192-18.432 32.5632-22.50752L206.9504 365.312c49.8432-15.16544 99.62496-30.3104 149.43232-45.40928a21.36064 21.36064 0 0 0 11.96032-9.3696l109.7216-178.2272c7.27552-11.42272 18.91328-25.05216 32.98304-25.05216 11.37664 0 24.01792 8.91904 35.29216 24.6784 42.65472 64.95744 85.31456 129.90464 127.91296 194.87744a21.28896 21.28896 0 0 0 12.1856 8.98048L882.90816 389.12c20.21888 7.17312 32.91648 16.37376 35.78368 25.93792 2.7392 9.14432-2.2784 23.54176-13.68064 39.98208z" :fill="isFavorite(row.item) ? '#FCD62C' : '#d1d5db'" /></svg>
                   </button>
                   <button
                     class="invite-btn"
-                    :class="`invite-btn--${inviteButtonTone(item)}`"
-                    :disabled="!canInvite(item) || isInviting(item)"
-                    @click="inviteLink(item)"
+                    :class="`invite-btn--${inviteButtonTone(row.item)}`"
+                    :disabled="!canInvite(row.item) || isInviting(row.item)"
+                    @click="inviteLink(row.item)"
                   >
-                    {{ inviteButtonText(item) }}
+                    {{ inviteButtonText(row.item) }}
                   </button>
                   <button
-                    v-if="canRemoveRelation(item) || isRemoving(item)"
+                    v-if="canRemoveRelation(row.item) || isRemoving(row.item)"
                     class="invite-btn invite-btn--remove"
-                    :disabled="isRemoving(item)"
-                    @click.stop="openRemoveDialog(item)"
+                    :disabled="isRemoving(row.item)"
+                    @click.stop="openRemoveDialog(row.item)"
                   >
-                    {{ isRemoving(item) ? "处理中..." : "删除" }}
+                    {{ isRemoving(row.item) ? "处理中..." : "删除" }}
                   </button>
                 </div>
               </div>
-            </template>
-
-            <div v-if="hasMore" class="planet-links-more">
-              上滑继续加载更多友链
             </div>
           </div>
+
+          <div v-if="hasMore" class="planet-links-more">
+            上滑继续加载更多友链
+          </div>
+        </div>
       </div>
 
     <div v-if="inviteDialogVisible" class="invite-mask" @click.self="closeInviteDialog">
@@ -1124,7 +1195,10 @@ watch(
 .planet-hero-scroll-icon{width:18px;height:18px;color:#64748b;animation:planet-hero-bounce 2.4s ease-in-out infinite}
 @keyframes planet-hero-bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(4px)}}
 .planet-links-table{display:flex;flex-direction:column;min-width:0;min-height:100%;gap:8px;padding:4px 0}
-.planet-links-self-card{position:relative;display:flex;align-items:stretch;padding:10px 14px;border-radius:20px;background:linear-gradient(135deg,#0f766e 0%,#0e7490 55%,#1e3a8a 100%);color:#f0fdfa;border:1px solid rgba(45,212,191,.55);box-shadow:0 2px 8px rgba(0,0,0,.06),inset 0 1px 0 rgba(255,255,255,.18);overflow:hidden}
+/* 虚拟滚动占位层：撑开总高度，子行绝对定位按 translateY 落位。 */
+.planet-links-virtual{position:relative;width:100%}
+.planet-links-vrow{position:absolute;left:0;right:0;top:0;height:68px;will-change:transform}
+.planet-links-self-card{position:relative;display:flex;align-items:stretch;height:100%;box-sizing:border-box;padding:10px 14px;border-radius:20px;background:linear-gradient(135deg,#0f766e 0%,#0e7490 55%,#1e3a8a 100%);color:#f0fdfa;border:1px solid rgba(45,212,191,.55);box-shadow:0 2px 8px rgba(0,0,0,.06),inset 0 1px 0 rgba(255,255,255,.18);overflow:hidden}
 .planet-links-self-card::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 85% 0%,rgba(153,246,228,.35),transparent 45%),radial-gradient(circle at 0% 100%,rgba(59,130,246,.28),transparent 50%);pointer-events:none}
 .self-card-corner{position:absolute;top:50%;right:14px;transform:translateY(-50%);display:inline-flex;align-items:center;height:22px;padding:0 10px;border-radius:999px;background:rgba(255,255,255,.22);color:#ecfeff;font-size:11px;font-weight:800;letter-spacing:.08em;border:1px solid rgba(255,255,255,.35);z-index:1}
 .self-card-inner{position:relative;z-index:1;display:flex;align-items:center;gap:12px;width:100%;min-width:0;padding-right:64px}
@@ -1137,7 +1211,7 @@ watch(
 .self-card-meta-item{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;color:rgba(236,254,255,.88);white-space:nowrap}
 .self-card-meta-host{color:#ccfbf1}
 .self-card-meta-icon{width:12px;height:12px;color:rgba(204,251,241,.9)}
-.planet-links-row{display:grid;grid-template-columns:minmax(250px,2fr) minmax(136px,1fr) 110px minmax(150px,1fr) minmax(140px,1fr) minmax(140px,1fr) 120px;gap:12px;align-items:center;padding:10px 14px;border-radius:20px;background:transparent;border:1px solid rgba(0,0,0,.05);box-shadow:0 2px 8px rgba(0,0,0,.03)}
+.planet-links-row{display:grid;grid-template-columns:minmax(250px,2fr) minmax(136px,1fr) 110px minmax(150px,1fr) minmax(140px,1fr) minmax(140px,1fr) 120px;gap:12px;align-items:center;height:100%;box-sizing:border-box;padding:10px 14px;border-radius:20px;background:transparent;border:1px solid rgba(0,0,0,.05);box-shadow:0 2px 8px rgba(0,0,0,.03)}
 .planet-links-row:hover{box-shadow:0 4px 14px rgba(0,0,0,.06)}
 .planet-links-row--action{border-color:rgba(147,197,253,.4)}
 .planet-links-row--linked{background:linear-gradient(90deg,rgba(236,253,245,.92),rgba(255,255,255,.88) 52%,rgba(209,250,229,.58))}
@@ -1154,7 +1228,7 @@ watch(
 .link-logo-fallback{display:flex;align-items:center;justify-content:center}
 .link-main-text{min-width:0}
 .link-title-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
-.link-title{font-size:13px;font-weight:600;color:#0f172a;line-height:1.3;word-break:break-word}
+.link-title{font-size:13px;font-weight:600;color:#0f172a;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .link-desc{margin-top:1px;font-size:12px;color:#64748b;line-height:1.45;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
 .site-name{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:5px;font-size:12px;color:#334155;font-weight:600;line-height:1.4;min-width:0;overflow:visible;text-align:center}
 .source-site-pill{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:999px;background:linear-gradient(135deg,#f0fdf4,#dcfce7);color:#166534;border:1px solid rgba(134,239,172,.6);font-size:11px;font-weight:600;white-space:nowrap}

@@ -23,13 +23,11 @@ const props = defineProps<{
   settings: AstraHubSettings;
   activeTab: FriendInvitationTab;
   // 由父组件统一持有 WS 后透传过来的最新事件。
-  // 父组件常驻订阅，确保用户在任何页面都能让红点 +1/-1；本组件挂载时只复用这个流刷新当前 tab 的列表行，不再自开 WS。
-  // 事件流包含友链邀请相关 + site_relation_updated；后者由 applyRealtimeInvitationEvent 内部跳过。
+
   realtimeEvent?: HubRealtimeEvent<unknown> | null;
 }>();
 
-// 本地审批/拒绝后，按 inviteId 通知父组件立即把红点 -1（不等 WS 回声、不刷整页）。
-// 父组件用 Set 去重保证幂等：本地操作 + WS 回声携带同一 inviteId 不会重复扣减。
+
 // add 由父组件的 WS 直接处理，子组件未挂载时也能 +1，因此这里不再发 add。
 const emit = defineEmits<{
   (e: "pending-inbox-remove", inviteId: string): void;
@@ -404,8 +402,7 @@ function matchesCurrentTab(item: FriendInvitationItem) {
 }
 
 function applyRealtimeInvitationEvent(event: HubRealtimeEvent<unknown>) {
-  // 父组件透传过来的事件流里也包含 site_relation_updated；它的 data 不是 FriendInvitationItem，
-  // 与友链邀请列表没关系，直接跳过。
+
   if (event.type === "site_relation_updated") {
     return;
   }
@@ -426,8 +423,7 @@ function applyRealtimeInvitationEvent(event: HubRealtimeEvent<unknown>) {
   } else if (exists) {
     removeLocalItem(invitation.inviteId);
   }
-  // 红点（pending 数）由父组件直接根据 WS 事件维护，这里不再 emit add/remove，
-  // 子组件只负责把当前 tab 的列表行做增量更新。
+
 }
 
 async function reload() {
@@ -461,7 +457,7 @@ async function reload() {
       const inboxTagged = tagDirection(inboxResp.items || [], "inbox");
       const outboxTagged = tagDirection(outboxResp.items || [], "outbox");
       const merged = new Map<string, FriendInvitationItem>();
-      // 先放 inbox，再用 outbox 覆盖（同一 inviteId 优先保留 outbox 方向标签）
+
       for (const item of inboxTagged) {
         const key = String(item.inviteId || "").trim();
         if (key) merged.set(key, item);
@@ -685,9 +681,7 @@ async function submitReview() {
     if (reviewMode.value === "approve" && reviewedInvitation) {
       await reconcileFriendInvitation(reviewedInvitation, currentSiteId());
     }
-    // 审核是收件箱操作，Hub 已在响应里回传权威的最新状态（已通过/已拒绝）。
-    // 直接用它即时更新本地这一行：仍属当前 tab 则替换，否则移除（如"待审核"tab 通过后该行应消失）。
-    // 这样红点立刻消失，不依赖 WS 回声或 reload 的 sync 是否成功。
+
     if (reviewedInvitation) {
       const reviewedItem = {
         ...reviewedInvitation,
@@ -699,12 +693,11 @@ async function submitReview() {
         removeLocalItem(reviewedItem.inviteId);
       }
     }
-    // 审核是收件箱操作，pending 数随之 -1，按 inviteId 通知父组件移除红点计数（不刷整页）。
+
     emit("pending-inbox-remove", reviewTarget.value.inviteId);
     reviewing.value = false;
     closeReviewDialog();
     Toast.success(reviewMode.value === "approve" ? "友链邀请已通过" : "友链邀请已拒绝");
-    await reload();
   } catch (e) {
     Toast.error(e instanceof Error ? e.message : "审核友链邀请失败");
   } finally {
@@ -729,7 +722,7 @@ function positionFloatingPanel(event: Event, panelSelector: string) {
   if (!panel) {
     return;
   }
-  // 让 panel 先按内容自然展开，再读尺寸
+
   panel.style.maxHeight = "";
   const triggerRect = trigger.getBoundingClientRect();
   const panelWidth = panel.offsetWidth;
@@ -738,7 +731,7 @@ function positionFloatingPanel(event: Event, panelSelector: string) {
   const margin = 8;
   let top = triggerRect.top - panelHeight - gap;
   if (top < margin) {
-    // 上方空间不够则放到下方
+
     top = triggerRect.bottom + gap;
   }
   let left = triggerRect.left + triggerRect.width / 2 - panelWidth / 2;
@@ -776,8 +769,7 @@ onBeforeUnmount(() => {
   }
 });
 
-// 父组件常驻 WS 订阅，子组件挂载时通过 prop 消费同一份事件流，避免重复连接，
-// 也保证用户切回友链管理 tab 时仍能实时刷新当前列表行。
+
 watch(
   () => props.realtimeEvent,
   (event) => {

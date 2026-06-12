@@ -44,6 +44,7 @@ public class HubRealtimeBridge {
     static final String HUB_MASCOT_BUBBLE_TYPE = "mascot_bubble";
     static final String HUB_MASCOT_ARTICLE_CARD_TYPE = "mascot_article_card";
     static final String HUB_FRIEND_RELATION_REMOVED_TYPE = "friend_relation_removed";
+    static final String HUB_SITE_PROFILE_UPDATED_TYPE = "site_profile_updated";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
@@ -194,10 +195,37 @@ public class HubRealtimeBridge {
             handleFriendRelationRemoved(parsed.relationRemoved());
             return;
         }
+        // Phase 5: 站点资料变更 → 同步本地友链。
+        if (parsed.profileUpdated() != null) {
+            handleSiteProfileUpdated(parsed.profileUpdated());
+            return;
+        }
         if (parsed.event() == null) {
             return;
         }
         mascotSink.tryEmitNext(parsed.event());
+    }
+
+    /**
+     * Hub 广播某站点资料更新后，把本地指向该站的友链 Link CR 同步成最新本体。
+     */
+    private void handleSiteProfileUpdated(SiteProfileUpdatedEvent event) {
+        if (event == null || safe(event.siteId()).trim().isEmpty()) {
+            return;
+        }
+        friendLinkReconcileService.updateLocalLinkByPeerSiteId(
+                event.siteId(), event.name(), event.url(), event.description(), event.nodeAvatar(), event.rssUrl())
+            .doOnNext(result -> {
+                if (!result.success()) {
+                    log.warn("[AstraHub] sync local link by peer site id failed: peerSiteId={}, message={}",
+                        event.siteId(), result.message());
+                }
+            })
+            .onErrorResume(error -> {
+                log.warn("[AstraHub] handle site_profile_updated failed", error);
+                return Mono.empty();
+            })
+            .subscribe();
     }
 
     /**
@@ -254,7 +282,7 @@ public class HubRealtimeBridge {
     static ParsedHubEvent parseHubMascotBubble(String raw) {
         ParsedHubEvent parsed = parseHubMascotEvent(raw);
         if (parsed.bubble() == null) {
-            return new ParsedHubEvent(parsed.eventId(), null, null);
+            return new ParsedHubEvent(parsed.eventId(), null, null, null);
         }
         return parsed;
     }
@@ -272,18 +300,21 @@ public class HubRealtimeBridge {
         if (HUB_FRIEND_RELATION_REMOVED_TYPE.equals(type)) {
             return parseFriendRelationRemoved(root, eventId);
         }
-        return new ParsedHubEvent(eventId, null, null);
+        if (HUB_SITE_PROFILE_UPDATED_TYPE.equals(type)) {
+            return parseSiteProfileUpdated(root, eventId);
+        }
+        return new ParsedHubEvent(eventId, null, null, null);
     }
 
     private static ParsedHubEvent parseHubMascotBubble(JsonNode root, String eventId) {
         JsonNode data = eventData(root);
         if (data == null) {
-            return new ParsedHubEvent(eventId, null, null);
+            return new ParsedHubEvent(eventId, null, null, null);
         }
         String title = text(data, "title");
         String message = text(data, "message");
         if (title.isBlank() && message.isBlank()) {
-            return new ParsedHubEvent(eventId, null, null);
+            return new ParsedHubEvent(eventId, null, null, null);
         }
         return new ParsedHubEvent(eventId, new HubMascotRealtimeEvent(
             HUB_MASCOT_BUBBLE_TYPE,
@@ -302,18 +333,18 @@ public class HubRealtimeBridge {
                 readStringList(data.path("targetSiteIds"))
             ),
             null
-        ), null);
+        ), null, null);
     }
 
     private static ParsedHubEvent parseHubMascotArticleCard(JsonNode root, String eventId) {
         JsonNode data = eventData(root);
         if (data == null) {
-            return new ParsedHubEvent(eventId, null, null);
+            return new ParsedHubEvent(eventId, null, null, null);
         }
         JsonNode article = data.path("article");
         if (article.isMissingNode() || article.isNull() || text(article, "title").isBlank()
             || text(article, "url").isBlank()) {
-            return new ParsedHubEvent(eventId, null, null);
+            return new ParsedHubEvent(eventId, null, null, null);
         }
         String title = text(data, "title");
         String message = text(data, "message");
@@ -339,19 +370,19 @@ public class HubRealtimeBridge {
                 article,
                 text(data, "reason")
             )
-        ), null);
+        ), null, null);
     }
 
     /** Parses a friend_relation_removed envelope into the typed event record. */
     private static ParsedHubEvent parseFriendRelationRemoved(JsonNode root, String eventId) {
         JsonNode data = eventData(root);
         if (data == null) {
-            return new ParsedHubEvent(eventId, null, null);
+            return new ParsedHubEvent(eventId, null, null, null);
         }
         String actorSiteId = text(data, "actorSiteId");
         String peerSiteId = text(data, "peerSiteId");
         if (actorSiteId.isBlank() && peerSiteId.isBlank()) {
-            return new ParsedHubEvent(eventId, null, null);
+            return new ParsedHubEvent(eventId, null, null, null);
         }
         return new ParsedHubEvent(eventId, null, new FriendRelationRemovedEvent(
             eventId,
@@ -361,6 +392,27 @@ public class HubRealtimeBridge {
             peerSiteId,
             text(data, "peerSiteUrl"),
             text(data, "reason")
+        ), null);
+    }
+
+    /** Parses a site_profile_updated envelope into the typed event record (Phase 5). */
+    private static ParsedHubEvent parseSiteProfileUpdated(JsonNode root, String eventId) {
+        JsonNode data = eventData(root);
+        if (data == null) {
+            return new ParsedHubEvent(eventId, null, null, null);
+        }
+        String siteId = text(data, "siteId");
+        if (siteId.isBlank()) {
+            return new ParsedHubEvent(eventId, null, null, null);
+        }
+        return new ParsedHubEvent(eventId, null, null, new SiteProfileUpdatedEvent(
+            eventId,
+            siteId,
+            text(data, "url"),
+            text(data, "name"),
+            text(data, "description"),
+            text(data, "nodeAvatar"),
+            text(data, "rssUrl")
         ));
     }
 
@@ -575,7 +627,8 @@ public class HubRealtimeBridge {
     public record ParsedHubEvent(
         String eventId,
         HubMascotRealtimeEvent event,
-        FriendRelationRemovedEvent relationRemoved
+        FriendRelationRemovedEvent relationRemoved,
+        SiteProfileUpdatedEvent profileUpdated
     ) {
         public HubMascotBubbleEvent bubble() {
             return event == null ? null : event.bubble();
@@ -584,6 +637,18 @@ public class HubRealtimeBridge {
         public HubMascotArticleCardEvent articleCard() {
             return event == null ? null : event.articleCard();
         }
+    }
+
+    /** Decoded site_profile_updated event from the hub (Phase 5 reverse sync). */
+    public record SiteProfileUpdatedEvent(
+        String id,
+        String siteId,
+        String url,
+        String name,
+        String description,
+        String nodeAvatar,
+        String rssUrl
+    ) {
     }
 
     /** Decoded friend_relation_removed event from the hub. */

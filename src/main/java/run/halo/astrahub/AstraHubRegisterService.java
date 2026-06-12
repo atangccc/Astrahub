@@ -36,7 +36,6 @@ public class AstraHubRegisterService {
 
     /**
      * 向 Hub 申请一张签发码，Hub 会把码发送到 contactEmail 指定的邮箱。
-     * 不会真正创建站点，只是从池中分配一张未使用的码。
      */
     public Mono<InvitationRequestResult> requestInvitation(InvitationRequestCommand command) {
         return Mono.fromCallable(() -> requestInvitationBlocking(command))
@@ -45,7 +44,6 @@ public class AstraHubRegisterService {
 
     /**
      * 使用邮箱收到的签发码 + 站点信息完成真正的注册。
-     * 复用现有的注册流程，只是请求头从 X-BP-Register-Token 换成 X-BP-Invitation-Code。
      */
     public Mono<RegisterResult> registerWithInvitation(InvitationRegisterCommand command) {
         return Mono.fromCallable(() -> registerWithInvitationBlocking(command))
