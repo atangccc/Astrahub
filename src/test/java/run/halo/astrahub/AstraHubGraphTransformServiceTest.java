@@ -18,7 +18,7 @@ class AstraHubGraphTransformServiceTest {
         new tools.jackson.databind.ObjectMapper();
 
     @Test
-    void shouldCarryFriendLinkRssUrlIntoGraphMeta() {
+    void shouldCarryFriendLinkRssUrlIntoGraphMetaWithoutCollectingArticles() {
         AstraHubCollectionService collectionService = mock(AstraHubCollectionService.class);
         AstraHubContentCollectionService contentCollectionService = mock(AstraHubContentCollectionService.class);
         ReactiveSettingFetcher settingFetcher = mock(ReactiveSettingFetcher.class);
@@ -51,33 +51,9 @@ class AstraHubGraphTransformServiceTest {
                 ""
             ))
         )));
-
-        when(contentCollectionService.collect()).thenReturn(Mono.just(new AstraHubContentCollectionService.CollectedContentPayload(
-            "2026-04-03T12:05:00Z",
-            "https://site.example",
-            List.of(new AstraHubContentCollectionService.CollectedContent(
-                "post-1",
-                "post",
-                "https://site.example/posts/graph-engine",
-                "Graph Engine",
-                "Relationship graph overview",
-                "https://site.example/covers/graph.png",
-                "Serenity",
-                List.of("Graph", "Go"),
-                List.of("System"),
-                List.of(new AstraHubContentCollectionService.GroupReference("category:tech", "Tech", 5, "content_category")),
-                "2026-04-01T08:00:00Z",
-                "2026-04-03T10:00:00Z",
-                "2026-04-01T08:00:00Z",
-                "published",
-                "public",
-                "en-US",
-                1200,
-                "[Friend](https://friend.example/home)",
-                "<p><a href=\"https://friend.example/home\">Friend</a></p>",
-                Map.of("contentKind", "post")
-            ))
-        )));
+        when(contentCollectionService.resolveSiteBaseInfo()).thenReturn(Mono.just(
+            new AstraHubContentCollectionService.SiteBaseInfo("2026-04-03T12:05:00Z", "https://site.example")
+        ));
 
         AstraHubGraphTransformService service =
             new AstraHubGraphTransformService(collectionService, contentCollectionService, settingFetcher);
@@ -85,6 +61,10 @@ class AstraHubGraphTransformServiceTest {
         AstraHubGraphTransformService.GraphPayload payload = service.buildBpGraphV1Payload().block();
 
         assertThat(payload).isNotNull();
+        assertThat(payload.contents())
+            .extracting(AstraHubGraphTransformService.GraphContent::externalId)
+            .containsExactlyInAnyOrder("self-link:site_abc123", "friend-link:friend-beta");
+
         AstraHubGraphTransformService.GraphContent friendContent = payload.contents().stream()
             .filter(item -> "friend-link".equals(item.meta().get("sourceType")))
             .findFirst()
@@ -92,6 +72,8 @@ class AstraHubGraphTransformServiceTest {
 
         assertThat(friendContent.canonicalUrl()).isEqualTo("https://friend.example/home");
         assertThat(friendContent.meta()).containsEntry("rssUrl", "https://friend.example/rss.xml");
+        assertThat(friendContent.tags()).isEmpty();
+        assertThat(friendContent.relatedContentExternalIds()).isEmpty();
     }
 
     private static tools.jackson.databind.JsonNode parseSetting(String value) {

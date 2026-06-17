@@ -27,12 +27,9 @@ const props = defineProps<{
 }>();
 
 
-const OVERFLOW_POPOVER_MAX = 20;
-
-const ROW_HEIGHT = 76; // 行步进（卡片高 + 行间距）
-const ROW_GAP = 8; // 行间距
-const OVERSCAN = 6; // 可视区上下缓冲行数
-
+const ROW_HEIGHT = 76;
+const ROW_GAP = 8;
+const OVERSCAN = 6;
 const DEFAULT_AVATAR_DATA_URI = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><path d="M512 512m-512 0a512 512 0 1 0 1024 0 512 512 0 1 0-1024 0Z" fill="#1A4066"/><path d="M675.623007 719.427534H348.369612a169.86709 169.86709 0 0 0-169.859709 169.867089v11.026784a511.431685 511.431685 0 0 0 666.965432 0v-11.026784a169.86709 169.86709 0 0 0-169.852328-169.867089zM786.783912 461.892345a273.602998 273.602998 0 0 1-74.323771 187.912931H311.539859a274.776532 274.776532 0 1 1 475.244053-187.912931z" fill="#CBD5D8"/><path d="M727.738215 477.731354a215.125616 215.125616 0 0 1-48.631512 136.484128H344.9302A215.716073 215.716073 0 1 1 727.738215 477.731354z" fill="#0E243A"/><path d="M755.342079 684.612714a34.726251 34.726251 0 0 1-10.332997 24.629437 35.737408 35.737408 0 0 1-24.97633 10.185383H303.959867a35.110048 35.110048 0 0 1-35.375753-34.81482 34.549113 34.549113 0 0 1 10.406804-24.629436 35.641459 35.641459 0 0 1 24.97633-10.178002h416.072885a35.043621 35.043621 0 0 1 35.301946 34.807438z" fill="#AD382B"/><path d="M398.624881 487.761741l-51.664985-0.915208a218.779069 218.779069 0 0 1 1.476143-22.28237l51.288568 6.192418a188.222921 188.222921 0 0 0-1.099726 17.00516zM403.437105 451.699582L353.536111 438.244544a149.090385 149.090385 0 0 1 102.673086-106.666052l11.978896 50.26265-5.993138-25.131325 6.214559 25.094421a97.587776 97.587776 0 0 0-64.972409 69.895344z" fill="#CBD5D8"/><path d="M383.58299 780.554591m15.02713 0l226.77238 0q15.02713 0 15.02713 15.02713l0 119.973476q0 15.02713-15.02713 15.02713l-226.77238 0q-15.02713 0-15.02713-15.02713l0-119.973476q0-15.02713 15.02713-15.02713Z" fill="#F7F7F7"/><path d="M449.92083 855.572149m-36.822372 0a36.822373 36.822373 0 1 0 73.644745 0 36.822373 36.822373 0 1 0-73.644745 0Z" fill="#D8D8D8"/><path d="M449.92083 855.572149m-22.511172 0a22.511172 22.511172 0 1 0 45.022344 0 22.511172 22.511172 0 1 0-45.022344 0Z" fill="#C6817B"/></svg>`)}`;
 
 const {
@@ -50,11 +47,22 @@ const {
 
 let favSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
+function favoriteUrls() {
+  const urls = props.settings.favorites?.pinnedSiteUrls;
+  return Array.isArray(urls) ? urls : [];
+}
+
 function isFavorite(item: PlanetLinkItem): boolean {
-  return props.settings.favorites.pinnedSiteUrls.includes(item.url);
+  return favoriteUrls().includes(item.url);
 }
 
 function toggleFavorite(item: PlanetLinkItem) {
+  if (!props.settings.favorites) {
+    props.settings.favorites = { pinnedSiteUrls: [] };
+  }
+  if (!Array.isArray(props.settings.favorites.pinnedSiteUrls)) {
+    props.settings.favorites.pinnedSiteUrls = [];
+  }
   const urls = props.settings.favorites.pinnedSiteUrls;
   const idx = urls.indexOf(item.url);
   if (idx >= 0) {
@@ -76,7 +84,7 @@ const orderedItems = computed(() => {
 
   const favorites: PlanetLinkItem[] = [];
   const rest: PlanetLinkItem[] = [];
-  const pinned = props.settings.favorites.pinnedSiteUrls;
+  const pinned = favoriteUrls();
   for (const item of items.value) {
     if (pinned.includes(item.url)) {
       favorites.push(item);
@@ -125,7 +133,6 @@ const relationParam = computed(() => {
 
 const renderItems = computed(() => filteredItems.value.slice(0, visibleItems.value.length));
 
-// ---- 虚拟滚动窗口（固定行高） ----
 const scrollTop = ref(0);
 const viewportHeight = ref(0);
 const heroHeight = ref(0);
@@ -176,12 +183,12 @@ const removeReason = ref("");
 
 const SIMPLE_STATUS_MAP = {
   relation: {
-    self: "本站",
+    self: "我的站点",
     mutual: "互相关注",
     oneWayOut: "我已关注",
     oneWayIn: "他已关注",
     invitable: "可发起邀请",
-    sentInvite: "已邀",
+    sentInvite: "已邀请",
     none: "没有关系",
     unknown: "暂未接入"
   }
@@ -227,6 +234,59 @@ function displayHost(rawUrl: string) {
   } catch {
     return value;
   }
+}
+
+function externalLinkHref(rawUrl: string) {
+  const value = String(rawUrl || "").trim();
+  if (!value) {
+    return "";
+  }
+  return /^https?:\/\//i.test(value) ? value : `https://${value}`;
+}
+
+function galaxyName(item: PlanetLinkItem) {
+  return String(item.galaxyName || "").trim();
+}
+
+function galaxyDisplayName(item: PlanetLinkItem) {
+  const name = galaxyName(item);
+  if (!name) return "";
+  const suffix = "星系";
+  const base = name.endsWith(suffix) ? name.slice(0, -suffix.length).trim() : name;
+  const chars = Array.from(base);
+  const displayBase = chars.length > 10 ? `${chars.slice(0, 10).join("")}...` : base;
+  return `${displayBase} ${suffix}`;
+}
+
+function sourceSiteCount(item: PlanetLinkItem) {
+  const count = Number(item.sourceSiteCount || 0);
+  return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+}
+
+function hotRank(item: PlanetLinkItem) {
+  const rank = Number(item.hotRank || 0);
+  return Number.isFinite(rank) && rank > 0 ? Math.floor(rank) : 0;
+}
+
+function hotRankTooltip(item: PlanetLinkItem) {
+  const rank = hotRank(item);
+  const prefix = rank > 0 ? `当前星系排行第 ${rank} 名。` : "当前暂无星系排行。";
+  return `${prefix}计算方法：关联星系数 x 40% + 本星系下星球数 x 20% + 被邀请数（同意和拒绝）x 40%，按总分从高到低排序。`;
+}
+
+function hotRankClass(item: PlanetLinkItem) {
+  const rank = hotRank(item);
+  if (rank === 1) return "rank-gold";
+  if (rank === 2) return "rank-silver";
+  if (rank === 3) return "rank-bronze";
+  return "rank-normal";
+}
+
+function shortDescription(value: string) {
+  const text = String(value || "").trim();
+  if (!text) return "暂无简介";
+  const chars = Array.from(text);
+  return chars.length > 15 ? `${chars.slice(0, 15).join("")}...` : text;
 }
 
 function formatUpdatedAt(value: string) {
@@ -288,6 +348,12 @@ function sameComparableSiteUrl(leftRawUrl: string, rightRawUrl: string) {
 }
 
 function isSelfLink(item: PlanetLinkItem) {
+  if (String(item.relationStatus || "").trim() === "self") {
+    return true;
+  }
+  if (String(item.targetInvitationState || "").trim() === "self_site") {
+    return true;
+  }
   const selfSiteId = currentSiteId();
   const targetSiteId = String(item.targetSiteId || "").trim();
   if (selfSiteId && targetSiteId && selfSiteId === targetSiteId) {
@@ -308,7 +374,7 @@ function hasLocalLink(item: PlanetLinkItem) {
 function invitationStateText(invitationState: string) {
   switch (String(invitationState || "").trim()) {
     case "self_site":
-      return "本站链接";
+      return "本站";
     case "site_not_found":
       return "尚未注册";
     case "site_id_missing":
@@ -347,6 +413,9 @@ function invitationStateTone(invitationState: string) {
 }
 
 function relationSummary(item: PlanetLinkItem) {
+  if (isSelfLink(item)) {
+    return { text: SIMPLE_STATUS_MAP.relation.self, tone: "muted" };
+  }
 
   const status = String(item.relationStatus || "").trim();
   switch (status) {
@@ -411,7 +480,7 @@ function isInviting(item: PlanetLinkItem) {
 
 function inviteButtonText(item: PlanetLinkItem) {
   if (isSelfLink(item)) {
-    return "本站链接";
+    return "本站";
   }
   const invitationState = String(item.targetInvitationState || "").trim();
   if (!item.targetRegistered) {
@@ -423,11 +492,8 @@ function inviteButtonText(item: PlanetLinkItem) {
   if (isInviting(item)) {
     return "正在邀请";
   }
-  if (hasLocalLink(item)) {
-    return "已加";
-  }
   if (hasActiveOutboxInvitation(item)) {
-    return "已邀";
+    return "已邀请";
   }
   if (!canInvite(item)) {
     return invitationStateText(invitationState);
@@ -437,7 +503,7 @@ function inviteButtonText(item: PlanetLinkItem) {
 
 function inviteButtonTone(item: PlanetLinkItem) {
   if (isSelfLink(item)) {
-    return "self";
+    return "plain";
   }
   const invitationState = String(item.targetInvitationState || "").trim();
   if (!item.targetRegistered) {
@@ -459,6 +525,10 @@ function inviteButtonTone(item: PlanetLinkItem) {
     return invitationStateTone(invitationState);
   }
   return "action";
+}
+
+function rowTone(item: PlanetLinkItem) {
+  return isSelfLink(item) ? "linked" : inviteButtonTone(item);
 }
 
 async function inviteLink(item: PlanetLinkItem) {
@@ -525,11 +595,11 @@ async function submitInvite() {
       return;
     }
 
-    const siteId = String(lookup.siteId || "").trim();
-    if (!siteId) {
-      Toast.warning("该站点未生成 AstraHub 站点标识，当前不能邀请");
-      return;
-    }
+      const siteId = String(lookup.siteId || "").trim();
+      if (!siteId) {
+        Toast.warning("该站点未生成 AstraHub 站点标识，当前不能邀请");
+        return;
+      }
 
     if (!lookup.supportsInvitation) {
       Toast.warning(lookup.invitationMessage || invitationStateText(lookup.invitationState));
@@ -547,7 +617,6 @@ async function submitInvite() {
   }
 }
 
-// 是否允许对该卡片显示"删除"按钮。与"已加"对齐：对方已接入、可接受邀请、当前已成边。
 function canRemoveRelation(item: PlanetLinkItem) {
   if (isSelfLink(item)) {
     return false;
@@ -639,7 +708,6 @@ function onScroll(event: Event) {
     return;
   }
 
-  // 虚拟滚动：滚动位置更新后 computed 重算渲染窗口。
   scrollTop.value = target.scrollTop;
   if (viewportHeight.value !== target.clientHeight) {
     viewportHeight.value = target.clientHeight;
@@ -851,7 +919,7 @@ watch(
           <div class="uv-loader"><span class="uv-loader-text">loading</span><span class="uv-load"></span></div>
         </div>
 
-        <!-- Hero 首屏：欢迎语，仿 AstraHub 探索页 -->
+        <!-- Hero 首屏 -->
         <section ref="heroEl" class="planet-hero">
           <img
             :src="HERO_MASCOT_DATA_URI"
@@ -888,7 +956,7 @@ watch(
             <EmptyState text="暂无可展示的友链数据" hint="接入星链并完成同步后，友链数据将在此展示" />
           </div>
 
-          <!-- 虚拟滚动容器：占位层撑总高 + 仅渲染可视窗口内的行（绝对定位）。 -->
+          <!-- 虚拟滚动容器 -->
           <div
             v-else
             class="planet-links-virtual"
@@ -900,50 +968,22 @@ watch(
               class="planet-links-vrow"
               :style="{ transform: `translateY(${row.top}px)` }"
             >
-              <!-- 本站卡片：独特样式，不展示状态信息和邀请按钮 -->
-              <div v-if="isSelfLink(row.item)" class="planet-links-self-card">
-                <span class="self-card-corner">本站</span>
-                <div class="self-card-inner">
-                  <div class="self-card-avatar">
-                    <img
-                      v-if="row.item.logo"
-                      :src="row.item.logo"
-                      alt=""
-                      class="self-card-logo"
-                      @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI"
-                    />
-                    <img v-else :src="DEFAULT_AVATAR_DATA_URI" alt="" class="self-card-logo" />
-                  </div>
-                  <div class="self-card-main">
-                    <div class="self-card-title">{{ row.item.title || row.item.url }}</div>
-                    <div class="self-card-desc">{{ row.item.description || "暂无简介" }}</div>
-                  </div>
-                  <div class="self-card-meta-block">
-                    <span class="self-card-meta-item self-card-meta-host">
-                      <svg viewBox="0 0 24 24" fill="none" class="self-card-meta-icon">
-                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6" />
-                        <path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-                      </svg>
-                      {{ displayHost(row.item.url) }}
-                    </span>
-                    <span class="self-card-meta-item">
-                      <svg viewBox="0 0 24 24" fill="none" class="self-card-meta-icon">
-                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6" />
-                        <path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
-                      </svg>
-                      {{ formatUpdatedAt(row.item.updatedAt) }}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- 普通友链行 -->
               <div
-                v-else
                 class="planet-links-row"
-                :class="`planet-links-row--${inviteButtonTone(row.item)}`"
+                :class="`planet-links-row--${rowTone(row.item)}`"
               >
                 <div class="link-main">
+                  <span
+                    class="hot-rank-badge"
+                    :class="hotRankClass(row.item)"
+                    :title="hotRankTooltip(row.item)"
+                    :aria-label="hotRankTooltip(row.item)"
+                  >
+                    <svg class="hot-rank-icon" viewBox="0 0 1024 1024" aria-hidden="true">
+                      <path d="M984.064 459.776a115.7632 115.7632 0 0 0-124.928-38.741333l-161.28 49.322666-57.685333-113.322666a143.291733 143.291733 0 0 0 36.352-95.914667c0-79.872-65.024-144.896-144.896-144.896s-144.896 65.024-144.896 144.896c0 36.010667 12.970667 69.632 36.352 95.914667l-57.685334 113.322666-161.28-49.322666c-45.909333-14.165333-94.890667 1.194667-124.928 38.741333-29.866667 37.546667-33.792 88.746667-9.557333 130.901333l115.541333 191.829334c9.728 16.213333 30.72 21.333333 46.933334 11.605333s21.333333-30.72 11.605333-46.933333l-115.2-191.146667c-15.018667-26.282667-0.682667-47.786667 4.096-53.76 4.778667-5.973333 22.528-24.746667 51.541333-15.872l188.586667 57.685333c15.872 4.778667 32.938667-2.389333 40.448-17.066666l82.432-161.962667c7.509333-14.848 3.413333-32.768-9.898667-42.837333a76.219733 76.219733 0 0 1-30.72-61.098667c0-42.154667 34.304-76.629333 76.629334-76.629333 42.154667 0 76.629333 34.304 76.629333 76.629333 0 24.234667-11.264 46.421333-30.72 61.098667a34.133333 34.133333 0 0 0-9.898667 42.837333l82.432 161.962667c7.509333 14.848 24.576 22.016 40.448 17.066666l188.586667-57.685333c29.184-8.874667 46.762667 9.898667 51.541333 15.872 4.778667 5.973333 19.114667 27.477333 3.925334 53.930667L734.037333 909.312H262.826667c-18.773333 0-34.133333 15.36-34.133334 34.133333s15.36 34.133333 34.133334 34.133334h491.178666c12.288 0 23.552-6.656 29.696-17.237334l210.432-370.346666a115.882667 115.882667 0 0 0-10.069333-130.218667z" />
+                    </svg>
+                    <span class="hot-rank-number">{{ hotRank(row.item) || "-" }}</span>
+                  </span>
                   <img v-if="row.item.logo" :src="row.item.logo" alt="" class="link-logo" @error="($event.target as HTMLImageElement).src = DEFAULT_AVATAR_DATA_URI" />
                   <div v-else class="link-logo link-logo-fallback">
                     <img :src="DEFAULT_AVATAR_DATA_URI" alt="" class="link-logo" />
@@ -952,41 +992,16 @@ watch(
                     <div class="link-title-row">
                       <div class="link-title">{{ row.item.title || row.item.url }}</div>
                     </div>
-                    <div class="link-desc">{{ row.item.description || "暂无简介" }}</div>
+                    <div class="link-desc" :title="row.item.description || ''">{{ shortDescription(row.item.description) }}</div>
                   </div>
                 </div>
 
-                <div class="site-name">
-                  <span
-                    v-for="name in visibleSourceSiteNames(row.item)"
-                    :key="name"
-                    class="source-site-pill"
-                  >{{ name }}</span>
-                  <span
-                    v-if="sourceSiteOverflow(row.item) > 0"
-                    class="overflow-badge overflow-badge--site"
-                    tabindex="0"
-                    :aria-label="`所属站点：${sourceSiteTooltip(row.item)}`"
-                  >
-                    +{{ sourceSiteOverflow(row.item) }}
-                    <span class="overflow-popover">
-                      <span
-                        v-for="sourceName in sourceSiteNames(row.item).slice(0, OVERFLOW_POPOVER_MAX)"
-                        :key="sourceName"
-                        class="overflow-popover-entry"
-                      >
-                        {{ sourceName }}
-                      </span>
-                      <span
-                        v-if="sourceSiteNames(row.item).length > OVERFLOW_POPOVER_MAX"
-                        class="overflow-popover-entry overflow-popover-more"
-                      >
-                        还有 {{ sourceSiteNames(row.item).length - OVERFLOW_POPOVER_MAX }} 个…
-                      </span>
-                    </span>
-                  </span>
-                  <span v-if="!sourceSiteNames(row.item).length" class="tag-empty">-</span>
+                <div class="galaxy-name-cell">
+                  <span v-if="galaxyDisplayName(row.item)" class="galaxy-name">{{ galaxyDisplayName(row.item) }}</span>
+                  <span v-else class="galaxy-empty">-</span>
                 </div>
+
+                <div class="galaxy-count-cell">星系{{ sourceSiteCount(row.item) }}</div>
 
                 <div class="relation-text">
                   <span class="relation-pill relation-summary-pill" :class="relationSummary(row.item).tone">
@@ -994,43 +1009,17 @@ watch(
                   </span>
                 </div>
 
-                <div class="link-url">{{ displayHost(row.item.url) }}</div>
+                <a
+                  v-if="externalLinkHref(row.item.url)"
+                  class="link-url link-url-anchor"
+                  :href="externalLinkHref(row.item.url)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  @click.stop
+                >{{ displayHost(row.item.url) }}</a>
+                <div v-else class="link-url">{{ displayHost(row.item.url) }}</div>
 
                 <div class="rss-time">{{ formatUpdatedAt(row.item.updatedAt) }}</div>
-
-                <div class="tag-list">
-                  <span
-                    v-for="tag in visibleTags(row.item)"
-                    :key="tag"
-                    class="tag-pill"
-                  >
-                    {{ tag }}
-                  </span>
-                  <span
-                    v-if="tagOverflow(row.item) > 0"
-                    class="overflow-badge overflow-badge--tag"
-                    tabindex="0"
-                    :aria-label="`标签：${tagTooltip(row.item)}`"
-                  >
-                    +{{ tagOverflow(row.item) }}
-                    <span class="overflow-popover">
-                      <span
-                        v-for="tag in (row.item.tags || []).slice(0, OVERFLOW_POPOVER_MAX)"
-                        :key="tag"
-                        class="overflow-popover-entry"
-                      >
-                        {{ tag }}
-                      </span>
-                      <span
-                        v-if="(row.item.tags || []).length > OVERFLOW_POPOVER_MAX"
-                        class="overflow-popover-entry overflow-popover-more"
-                      >
-                        还有 {{ (row.item.tags || []).length - OVERFLOW_POPOVER_MAX }} 个…
-                      </span>
-                    </span>
-                  </span>
-                  <span v-if="!(row.item.tags || []).length" class="tag-empty">-</span>
-                </div>
 
                 <div class="action-cell">
                   <button
@@ -1042,14 +1031,6 @@ watch(
                     <svg viewBox="0 0 1024 1024" width="20" height="20" xmlns="http://www.w3.org/2000/svg"><path d="M959.24224 401.32608c-7.36256-24.57088-28.78976-43.22304-63.6928-55.43936a15.36 15.36 0 0 0-1.3824-0.43008l-189.54752-51.4304c-41.09824-62.68416-82.25792-125.34272-123.40736-188.01664-0.17408-0.24576-0.54272-0.8192-0.7168-1.06496-19.79904-27.68896-44.48256-42.94656-69.46304-42.94656-18.06336 0-44.544 7.78752-68.38784 45.2096L337.08032 278.69184c-47.27296 14.32576-94.54592 28.71808-141.84448 43.10016L126.1056 342.81984C93.91104 353.28 73.56928 370.2016 65.64864 393.12896c-8.30976 24.0896-2.46784 52.1728 17.87904 85.87264 0.49152 0.82432 1.03424 1.60768 1.61792 2.34496a203168.54272 203168.54272 0 0 1 124.05248 157.1584c-2.11968 75.5712-4.2752 151.2192-6.47168 226.87232-3.15392 36.21888 2.08896 61.74208 16 78.0288 10.54208 12.3392 25.20064 18.59072 43.5712 18.59072 14.07488 0 30.7712-3.67616 53.2992-11.86816l182.52288-74.2912a116757.43744 116757.43744 0 0 0 207.60064 77.18912c13.62432 4.38784 26.23488 6.60992 37.49888 6.60992 25.68192 0 69.27872-11.81184 72.76544-90.96192a21.24288 21.24288 0 0 0-0.02048-2.42176c-3.81952-67.45088-7.68-134.74304-11.53536-202.08128l-0.0512-0.88576 134.43584-180.78208c20.74112-29.82912 27.61728-57.15968 20.4288-81.1776z" :fill="isFavorite(row.item) ? '#FCD62C' : '#d1d5db'" /><path d="M905.0112 455.04l-139.04896 186.95168a23.63904 23.63904 0 0 0-4.55168 15.43168l0.5376 9.51808c3.82976 66.90304 7.67488 133.7856 11.4688 200.8064-2.35008 46.63296-20.44416 46.63296-30.20288 46.63296-7.08096 0-15.54432-1.56672-24.31488-4.36736a142424.4224 142424.4224 0 0 1-214.05696-79.63136 20.1984 20.1984 0 0 0-14.63808 0.21504l-189.06624 76.9792c-16.9984 6.1696-29.70624 9.1648-38.8352 9.1648-8.85248 0-11.20256-2.74944-12.08832-3.77344-2.45248-2.87744-7.85408-12.90752-5.05344-44.02688 0.03584-0.4864 0.07168-0.96768 0.08704-1.4592 2.2784-78.78656 4.52608-157.55264 6.7328-236.23168a23.6032 23.6032 0 0 0-4.97152-15.21664 163892.8896 163892.8896 0 0 0-128.37376-162.66752c-11.77088-19.80928-16.2816-35.2256-13.02016-44.63616 3.82976-11.10528 20.0192-18.432 32.5632-22.50752L206.9504 365.312c49.8432-15.16544 99.62496-30.3104 149.43232-45.40928a21.36064 21.36064 0 0 0 11.96032-9.3696l109.7216-178.2272c7.27552-11.42272 18.91328-25.05216 32.98304-25.05216 11.37664 0 24.01792 8.91904 35.29216 24.6784 42.65472 64.95744 85.31456 129.90464 127.91296 194.87744a21.28896 21.28896 0 0 0 12.1856 8.98048L882.90816 389.12c20.21888 7.17312 32.91648 16.37376 35.78368 25.93792 2.7392 9.14432-2.2784 23.54176-13.68064 39.98208z" :fill="isFavorite(row.item) ? '#FCD62C' : '#d1d5db'" /></svg>
                   </button>
                   <button
-                    class="invite-btn"
-                    :class="`invite-btn--${inviteButtonTone(row.item)}`"
-                    :disabled="!canInvite(row.item) || isInviting(row.item)"
-                    @click="inviteLink(row.item)"
-                  >
-                    {{ inviteButtonText(row.item) }}
-                  </button>
-                  <button
                     v-if="canRemoveRelation(row.item) || isRemoving(row.item)"
                     class="invite-btn invite-btn--remove"
                     :disabled="isRemoving(row.item)"
@@ -1057,14 +1038,28 @@ watch(
                   >
                     {{ isRemoving(row.item) ? "处理中..." : "删除" }}
                   </button>
+                  <button
+                    v-else-if="isSelfLink(row.item)"
+                    class="invite-btn invite-btn--plain"
+                    disabled
+                  >
+                    {{ inviteButtonText(row.item) }}
+                  </button>
+                  <button
+                    v-else
+                    class="invite-btn"
+                    :class="`invite-btn--${inviteButtonTone(row.item)}`"
+                    :disabled="!canInvite(row.item) || isInviting(row.item)"
+                    @click="inviteLink(row.item)"
+                  >
+                    {{ inviteButtonText(row.item) }}
+                  </button>
                 </div>
               </div>
             </div>
           </div>
 
-          <div v-if="hasMore" class="planet-links-more">
-            上滑继续加载更多友链
-          </div>
+          <div v-if="hasMore" class="planet-links-more">上滑继续加载更多友链</div>
         </div>
       </div>
 
@@ -1188,30 +1183,17 @@ watch(
 .planet-hero-mascot{position:absolute;right:calc(50% + 240px);left:auto;top:50%;transform:translateY(-54%);z-index:0;width:clamp(160px,18vw,300px);height:auto;object-fit:contain;opacity:.92;pointer-events:none;user-select:none;-webkit-user-drag:none}
 @media (max-width:1100px){.planet-hero-mascot{display:none}}
 .planet-hero-inner{position:relative;z-index:1;max-width:680px;width:100%;display:flex;flex-direction:column;align-items:center;text-align:center;gap:24px}
-.planet-hero-title{margin:0;font-family:"STHupo","华文琥珀","Chalkboard SE","Yuanti SC","STYuanti","华文圆体","Comic Sans MS","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;font-size:clamp(40px,7vw,76px);line-height:1.2;font-weight:normal;letter-spacing:.04em;color:#0f172a;padding-bottom:8px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+.planet-hero-title{margin:0;font-family:"STHupo","Chalkboard SE","Yuanti SC","STYuanti","Comic Sans MS","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;font-size:clamp(40px,7vw,76px);line-height:1.2;font-weight:normal;letter-spacing:.04em;color:#0f172a;padding-bottom:8px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .planet-hero-title-accent{display:inline-block;background:linear-gradient(90deg,#38bdf8 0%,#a78bfa 50%,#f472b6 100%);-webkit-background-clip:text;background-clip:text;color:transparent;padding:0 .08em .12em .08em}
 .planet-hero-desc{margin:0;max-width:560px;font-size:15px;line-height:1.75;color:#64748b;letter-spacing:.01em}
 .planet-hero-scroll-hint{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:4px;color:#64748b;font-size:12px;font-weight:600;z-index:2}
 .planet-hero-scroll-icon{width:18px;height:18px;color:#64748b;animation:planet-hero-bounce 2.4s ease-in-out infinite}
 @keyframes planet-hero-bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(4px)}}
 .planet-links-table{display:flex;flex-direction:column;min-width:0;min-height:100%;gap:8px;padding:4px 0}
-/* 虚拟滚动占位层：撑开总高度，子行绝对定位按 translateY 落位。 */
+/* 虚拟滚动占位层 */
 .planet-links-virtual{position:relative;width:100%}
 .planet-links-vrow{position:absolute;left:0;right:0;top:0;height:68px;will-change:transform}
-.planet-links-self-card{position:relative;display:flex;align-items:stretch;height:100%;box-sizing:border-box;padding:10px 14px;border-radius:20px;background:linear-gradient(135deg,#0f766e 0%,#0e7490 55%,#1e3a8a 100%);color:#f0fdfa;border:1px solid rgba(45,212,191,.55);box-shadow:0 2px 8px rgba(0,0,0,.06),inset 0 1px 0 rgba(255,255,255,.18);overflow:hidden}
-.planet-links-self-card::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 85% 0%,rgba(153,246,228,.35),transparent 45%),radial-gradient(circle at 0% 100%,rgba(59,130,246,.28),transparent 50%);pointer-events:none}
-.self-card-corner{position:absolute;top:50%;right:14px;transform:translateY(-50%);display:inline-flex;align-items:center;height:22px;padding:0 10px;border-radius:999px;background:rgba(255,255,255,.22);color:#ecfeff;font-size:11px;font-weight:800;letter-spacing:.08em;border:1px solid rgba(255,255,255,.35);z-index:1}
-.self-card-inner{position:relative;z-index:1;display:flex;align-items:center;gap:12px;width:100%;min-width:0;padding-right:64px}
-.self-card-avatar{flex-shrink:0;width:34px;height:34px;display:flex;align-items:center;justify-content:center}
-.self-card-logo{width:100%;height:100%;border-radius:10px;object-fit:cover;background:transparent}
-.self-card-main{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px}
-.self-card-title{font-size:13px;font-weight:700;color:#f0fdfa;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.self-card-desc{font-size:12px;color:rgba(236,254,255,.78);line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.self-card-meta-block{flex-shrink:0;display:flex;flex-direction:row;align-items:center;justify-content:center;gap:14px}
-.self-card-meta-item{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;color:rgba(236,254,255,.88);white-space:nowrap}
-.self-card-meta-host{color:#ccfbf1}
-.self-card-meta-icon{width:12px;height:12px;color:rgba(204,251,241,.9)}
-.planet-links-row{display:grid;grid-template-columns:minmax(250px,2fr) minmax(136px,1fr) 110px minmax(150px,1fr) minmax(140px,1fr) minmax(140px,1fr) 120px;gap:12px;align-items:center;height:100%;box-sizing:border-box;padding:10px 14px;border-radius:20px;background:transparent;border:1px solid rgba(0,0,0,.05);box-shadow:0 2px 8px rgba(0,0,0,.03)}
+.planet-links-row{display:grid;grid-template-columns:minmax(240px,1.7fr) minmax(130px,.9fr) 82px 110px minmax(140px,.9fr) minmax(128px,.8fr) 126px;gap:10px;align-items:center;height:100%;box-sizing:border-box;padding:10px 14px;border-radius:20px;background:transparent;border:1px solid rgba(0,0,0,.05);box-shadow:0 2px 8px rgba(0,0,0,.03);overflow:hidden}
 .planet-links-row:hover{box-shadow:0 4px 14px rgba(0,0,0,.06)}
 .planet-links-row--action{border-color:rgba(147,197,253,.4)}
 .planet-links-row--linked{background:linear-gradient(90deg,rgba(236,253,245,.92),rgba(255,255,255,.88) 52%,rgba(209,250,229,.58))}
@@ -1230,16 +1212,19 @@ watch(
 .link-title-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .link-title{font-size:13px;font-weight:600;color:#0f172a;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .link-desc{margin-top:1px;font-size:12px;color:#64748b;line-height:1.45;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
-.site-name{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:5px;font-size:12px;color:#334155;font-weight:600;line-height:1.4;min-width:0;overflow:visible;text-align:center}
-.source-site-pill{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:999px;background:linear-gradient(135deg,#f0fdf4,#dcfce7);color:#166534;border:1px solid rgba(134,239,172,.6);font-size:11px;font-weight:600;white-space:nowrap}
-.overflow-badge{position:relative;display:inline-flex;align-items:center;justify-content:center;height:20px;padding:0 7px;border-radius:999px;font-size:11px;font-weight:800;cursor:help;outline:none;flex-shrink:0;letter-spacing:.01em}
-.overflow-badge--site{background:linear-gradient(135deg,#ccfbf1,#99f6e4);color:#0f766e;border:1px solid rgba(45,212,191,.5)}
-.overflow-badge--tag{background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#1d4ed8;border:1px solid rgba(147,197,253,.6)}
-.overflow-popover{position:absolute;left:50%;bottom:calc(100% + 10px);z-index:8;width:max-content;max-width:360px;max-height:240px;overflow-y:auto;transform:translate(-50%,6px);padding:9px 11px;border-radius:12px;background:rgba(15,23,42,.96);box-shadow:0 18px 42px rgba(15,23,42,.24);color:#f8fafc;opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;display:flex;flex-wrap:wrap;gap:5px}
-.overflow-popover::after{content:"";position:absolute;left:50%;bottom:-5px;width:10px;height:10px;transform:translateX(-50%) rotate(45deg);background:rgba(15,23,42,.96)}
-.overflow-popover-entry{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;background:rgba(255,255,255,.12);white-space:nowrap;font-size:11px;font-weight:600}
-.overflow-popover-more{background:transparent;color:rgba(248,250,252,.6);font-weight:500}
-.overflow-badge:hover .overflow-popover,.overflow-badge:focus-visible .overflow-popover{opacity:1;transform:translate(-50%,0)}
+.hot-rank-badge{position:relative;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:36px;height:34px;color:#2563eb;background:transparent;border:none}
+.hot-rank-icon{width:24px;height:24px;fill:currentColor}
+.hot-rank-number{position:absolute;right:0;bottom:1px;display:flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:#fff;color:currentColor;border:1px solid rgba(148,163,184,.35);font-size:9px;font-weight:800;line-height:1;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.hot-rank-badge.rank-gold{color:#eab308}
+.hot-rank-badge.rank-silver{color:#94a3b8}
+.hot-rank-badge.rank-bronze{color:#cd7f32}
+.hot-rank-badge.rank-normal{color:#2563eb}
+.galaxy-name-cell,.galaxy-count-cell{display:flex;align-items:center;justify-content:center;min-width:0;text-align:center}
+.galaxy-name{max-width:100%;font-size:12px;font-weight:700;color:#0f766e;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.galaxy-empty{font-size:12px;color:#94a3b8}
+.galaxy-count-cell{font-size:12px;font-weight:600;color:#334155;line-height:1.45;white-space:nowrap}
+.link-url-anchor{text-decoration:none;color:#0f766e}
+.link-url-anchor:hover{text-decoration:underline}
 .relation-pill{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:700}
 .relation-text{display:flex;align-items:center;justify-content:center;min-width:0;text-align:center}
 .relation-pill.ok{background:#ecfdf5;color:#047857}
@@ -1253,11 +1238,11 @@ watch(
 .tag-list{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:6px;overflow:visible;text-align:center}
 .tag-pill{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;background:#eff6ff;color:#2563eb;font-size:11px;font-weight:600}
 .tag-empty{font-size:12px;color:#94a3b8}
-.action-cell{display:flex;align-items:center;justify-content:center;gap:6px}
-.fav-btn{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border:none;border-radius:50%;background:transparent;color:#d1d5db;cursor:pointer;transition:color .15s,transform .15s}
-.fav-btn:hover{color:#FCD62C;transform:scale(1.2)}
+.action-cell{display:flex;align-items:center;justify-content:center;gap:6px;min-width:0}
+.fav-btn{display:inline-flex;align-items:center;justify-content:center;width:26px;min-width:26px;height:26px;box-sizing:border-box;border:none;border-radius:0;background:transparent;color:#d1d5db;cursor:pointer;transition:color .15s,filter .15s,transform .15s;padding:0;flex-shrink:0}
+.fav-btn:hover{color:#FCD62C;filter:drop-shadow(0 0 4px rgba(252,214,44,.42));transform:translateY(-1px)}
 .fav-btn--active{color:#FCD62C;filter:drop-shadow(0 0 4px rgba(252,214,44,.5))}
-.invite-btn{display:inline-flex;align-items:center;justify-content:center;outline:none;padding:5px 12px;border:2px dashed #64748b;border-radius:15px;background-color:#f1f5f9;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;transition:box-shadow .2s ease,filter .2s ease;box-shadow:0 0 0 3px #f1f5f9,1.5px 1.5px 3px 1px rgba(0,0,0,.15);white-space:nowrap}
+.invite-btn{display:inline-flex;align-items:center;justify-content:center;outline:none;padding:5px 12px;border:2px dashed #64748b;border-radius:15px;background-color:#f1f5f9;color:#64748b;font-size:11px;font-weight:600;cursor:pointer;transition:box-shadow .2s ease,filter .2s ease;box-shadow:0 0 0 3px #f1f5f9,1.5px 1.5px 3px 1px rgba(0,0,0,.15);white-space:nowrap;min-width:72px;flex-shrink:0}
 .invite-btn:hover{box-shadow:0 0 0 3px #f1f5f9,2px 5px 0 0 currentColor;filter:brightness(.96)}
 .invite-btn:active{box-shadow:0 0 0 3px #f1f5f9,0 0 0 0 currentColor;filter:brightness(.92)}
 .invite-btn--action{border-color:#075985;color:#075985;background-color:#f0f9ff;box-shadow:0 0 0 3px #f0f9ff,1.5px 1.5px 3px 1px rgba(0,0,0,.15)}
@@ -1271,6 +1256,7 @@ watch(
 .invite-btn--warning{border-color:#fcd34d;background:linear-gradient(180deg,#fffbeb 0%,#fef3c7 100%);color:#b45309}
 .invite-btn--loading{border-color:#93c5fd;background:linear-gradient(180deg,#eff6ff 0%,#dbeafe 100%);color:#1d4ed8}
 .invite-btn--muted{border-color:#fda4af;background:linear-gradient(180deg,#fff1f2 0%,#ffe4e6 100%);color:#be123c}
+.invite-btn--plain{border-color:#cbd5e1;background:#f8fafc;color:#64748b;box-shadow:0 0 0 3px #f8fafc,1.5px 1.5px 3px 1px rgba(0,0,0,.08)}
 .invite-btn--remove{border-color:#fca5a5;background:linear-gradient(180deg,#fef2f2 0%,#fee2e2 100%);color:#b91c1c}
 .invite-btn--remove:hover{box-shadow:0 0 0 3px #fef2f2,2px 5px 0 0 #b91c1c}
 .invite-btn:disabled{cursor:not-allowed;opacity:1}

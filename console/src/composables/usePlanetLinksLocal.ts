@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+﻿import { computed, ref } from "vue";
 import type { PlanetLinkItem, PlanetLinksResponse } from "../types";
 
 const PAGE_SIZE = 50;
@@ -141,3 +141,4 @@ export function usePlanetLinksLocal() {
     setQuery
   };
 }
+

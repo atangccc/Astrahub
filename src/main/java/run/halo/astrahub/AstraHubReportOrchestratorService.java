@@ -238,26 +238,14 @@ public class AstraHubReportOrchestratorService {
 
     private Mono<AstraHubPushService.PushResult> buildAndPush(
         String trigger, ServerRequest request, SyncPolicy policy) {
-        String incrementalSince = resolveIncrementalSince(trigger, request, policy);
-        boolean incremental = !incrementalSince.isBlank();
         String syncReason = resolveSyncReason(trigger, request);
-        String startMessage = incremental
-            ? "incremental push in progress"
-            : "push in progress";
-        publish(HubPhase.RUNNING, trigger, true, true, 0, startMessage, "", nextRunAt.get());
+        publish(HubPhase.RUNNING, trigger, true, true, 0, "push in progress", "", nextRunAt.get());
         if (policy != null && policy.debugLoggingEnabled()) {
-            log.info("[AstraHub] {} push start trigger={} since={}",
-                incremental ? "incremental" : "full",
-                trigger,
-                incrementalSince);
+            log.info("[AstraHub] push start trigger={}", trigger);
         }
-        Mono<AstraHubGraphTransformService.GraphPayload> payloadMono = incremental
-            ? (request == null
-                ? graphTransformService.buildBpGraphV1PayloadSince(incrementalSince, syncReason)
-                : graphTransformService.buildBpGraphV1PayloadSince(incrementalSince, request, syncReason))
-            : (request == null
-                ? graphTransformService.buildBpGraphV1Payload(syncReason)
-                : graphTransformService.buildBpGraphV1Payload(request, syncReason));
+        Mono<AstraHubGraphTransformService.GraphPayload> payloadMono = request == null
+            ? graphTransformService.buildBpGraphV1Payload(syncReason)
+            : graphTransformService.buildBpGraphV1Payload(request, syncReason);
         return payloadMono
             .flatMap(pushService::pushGraph)
             .onErrorResume(error -> {
@@ -266,8 +254,7 @@ public class AstraHubReportOrchestratorService {
             })
             .doOnNext(result -> {
                 if (policy != null && policy.debugLoggingEnabled()) {
-                    log.info("[AstraHub] {} push finished trigger={} status={} success={} message={}",
-                        incremental ? "incremental" : "full",
+                    log.info("[AstraHub] push finished trigger={} status={} success={} message={}",
                         trigger,
                         result.status(),
                         result.success(),
@@ -292,10 +279,8 @@ public class AstraHubReportOrchestratorService {
                 int intervalMinutes = Math.max(1, readInt(sync, "intervalMinutes", DEFAULT_INTERVAL_MINUTES));
                 int retryBackoffSeconds = Math.max((int) MIN_RETRY_BACKOFF.getSeconds(),
                     readInt(sync, "retryBackoffSeconds", 30));
-                boolean incrementalEnabled = readBoolean(sync, "incrementalEnabled", false);
                 boolean debugLoggingEnabled = readBoolean(sync, "debugLoggingEnabled", false);
                 return new SyncPolicy(
-                    incrementalEnabled,
                     debugLoggingEnabled,
                     Duration.ofMinutes(intervalMinutes),
                     Duration.ofSeconds(retryBackoffSeconds)
@@ -437,27 +422,6 @@ public class AstraHubReportOrchestratorService {
         return value == null ? "" : value;
     }
 
-    private String resolveIncrementalSince(String trigger, ServerRequest request, SyncPolicy policy) {
-        if (request != null) {
-            String since = trim(request.queryParam("since").orElse(""));
-            if (!since.isBlank()) {
-                return since;
-            }
-            String mode = trim(request.queryParam("mode").orElse(""));
-            if ("incremental".equalsIgnoreCase(mode)) {
-                return safe(lastSuccessfulPushAt.get());
-            }
-        }
-        if (!"auto".equalsIgnoreCase(trigger) || policy == null || !policy.incrementalEnabled()) {
-            return "";
-        }
-        return safe(lastSuccessfulPushAt.get());
-    }
-
-    private static String trim(String value) {
-        return value == null ? "" : value.trim();
-    }
-
     private static String nowIso() {
         return OffsetDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
     }
@@ -469,7 +433,6 @@ public class AstraHubReportOrchestratorService {
     }
 
     private record SyncPolicy(
-        boolean incrementalEnabled,
         boolean debugLoggingEnabled,
         Duration interval,
         Duration retryBackoff

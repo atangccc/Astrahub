@@ -349,32 +349,22 @@ function reviewStatusInfoLines(item: FriendInvitationItem): Array<{ label: "我"
   return lines;
 }
 
-function deliveryStatusText(status?: string) {
-  switch (String(status || "").trim().toLowerCase()) {
-    case "acknowledged":
-      return "已确认";
-    case "delivered":
-      return "已送达";
-    case "failed":
-      return "投递失败";
-    case "pending":
-      return "投递中";
-    default:
-      return "-";
-  }
+function reviewResultText(item: FriendInvitationItem) {
+  if (item.status === "accepted") return "同意";
+  if (item.status === "rejected") return "拒绝";
+  return "-";
 }
 
-function shouldShowDeliveryStatus(item: FriendInvitationItem) {
-  return String(item.deliveryStatus || "").trim() !== "";
+function shouldShowReviewResult(item: FriendInvitationItem) {
+  return item.status === "accepted" || item.status === "rejected";
 }
 
-function isDeliverySuccess(status?: string) {
-  const s = String(status || "").trim().toLowerCase();
-  return s === "acknowledged" || s === "delivered";
+function isReviewAccepted(item: FriendInvitationItem) {
+  return item.status === "accepted";
 }
 
-function deliveryIconClass(status?: string) {
-  return isDeliverySuccess(status) ? "delivery-ok" : "delivery-fail";
+function reviewResultIconClass(item: FriendInvitationItem) {
+  return isReviewAccepted(item) ? "review-result-ok" : "review-result-fail";
 }
 
 function matchesCurrentTab(item: FriendInvitationItem) {
@@ -906,10 +896,10 @@ watch(
                 </div>
               </div>
 
-              <div class="status-cell delivery-status-cell">
-                <span v-if="!shouldShowDeliveryStatus(item)" class="delivery-text muted">-</span>
-                <span v-else class="delivery-icon" :class="deliveryIconClass(item.deliveryStatus)" :title="deliveryStatusText(item.deliveryStatus)">
-                  <svg v-if="isDeliverySuccess(item.deliveryStatus)" viewBox="0 0 20 20" fill="none" width="18" height="18">
+              <div class="status-cell review-result-cell">
+                <span v-if="!shouldShowReviewResult(item)" class="review-result-text muted">-</span>
+                <span v-else class="review-result-icon" :class="reviewResultIconClass(item)" :title="reviewResultText(item)">
+                  <svg v-if="isReviewAccepted(item)" viewBox="0 0 20 20" fill="none" width="18" height="18">
                     <circle cx="10" cy="10" r="8.5" stroke="currentColor" stroke-width="1.6" />
                     <path d="M6.5 10.5l2.5 2.5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
@@ -1036,7 +1026,7 @@ watch(
 .sp-header-btn:disabled{opacity:.5;cursor:not-allowed}
 .friend-table-wrap{position:relative;flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column}
 .friend-table{display:flex;flex-direction:column;min-width:0;gap:8px;padding:4px 0;flex:1;min-height:100%}
-.friend-row{display:grid;grid-template-columns:46px minmax(150px,1fr) 42px minmax(170px,1fr) minmax(210px,1.05fr) 110px 90px 160px 132px;gap:12px;align-items:center;padding:10px 14px;border-radius:20px;background:transparent;border:1px solid rgba(0,0,0,.05);box-shadow:0 2px 8px rgba(0,0,0,.03);box-sizing:border-box;height:60px}
+.friend-row{display:grid;grid-template-columns:46px minmax(150px,.95fr) 38px minmax(150px,1fr) minmax(36px,.25fr) 104px 56px 148px 124px;gap:8px;align-items:center;padding:10px 12px;border-radius:20px;background:transparent;border:1px solid rgba(0,0,0,.05);box-shadow:0 2px 8px rgba(0,0,0,.03);box-sizing:border-box;height:60px}
 .friend-row:hover{box-shadow:0 4px 14px rgba(0,0,0,.06)}
 .friend-row--pending{border-color:rgba(147,197,253,.3)}
 .friend-row--ok{border-color:rgba(134,239,172,.3)}
@@ -1083,10 +1073,10 @@ watch(
 .review-reason-text{color:#334155}
 .review-reason-popover::after{content:"";position:absolute;left:-5px;top:50%;width:10px;height:10px;transform:translateY(-50%) rotate(45deg);background:rgba(255,255,255,.92);border-left:1px solid rgba(203,213,225,.8);border-bottom:1px solid rgba(203,213,225,.8)}
 .review-reason-trigger:hover .review-reason-popover,.review-reason-trigger:focus-visible .review-reason-popover{opacity:1;transform:translate(0,-50%)}
-.delivery-text{font-size:11px;color:#94a3b8;line-height:1.5}
-.delivery-icon{display:inline-flex;align-items:center;justify-content:center}
-.delivery-icon.delivery-ok{color:#047857}
-.delivery-icon.delivery-fail{color:#b91c1c}
+.review-result-text{font-size:11px;color:#94a3b8;line-height:1.5}
+.review-result-icon{display:inline-flex;align-items:center;justify-content:center}
+.review-result-icon.review-result-ok{color:#047857}
+.review-result-icon.review-result-fail{color:#b91c1c}
 .friend-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:200px}
 .loading-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#ffffff;z-index:5}
 .uv-loader{width:80px;height:50px;position:relative}

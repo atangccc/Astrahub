@@ -23,9 +23,16 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * 构建 {@code bp.graph.v1} 上报载荷。
+ *
+ * <p>本服务只上报站点身份（source）、友链分组（groups）以及由友链与本站自身派生的链接节点
+ * （friend-link / self-link）。插件不再抓取、不再上报任何站点文章——主星（Blog Planet）已能通过
+ * 上报的站点 RSS 链接自行解析文章。因此这里彻底移除了文章采集、正文外链解析、related/mention
+ * 关系抽取等逻辑，contents 只包含友链与 self-link 两类节点。
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -35,12 +42,6 @@ public class AstraHubGraphTransformService {
     private static final String GRAPH_VERSION = "bp.graph.v1";
     private static final Pattern EMAIL_PATTERN =
         Pattern.compile("(?i)\\b[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}\\b");
-    private static final Pattern MARKDOWN_LINK_PATTERN =
-        Pattern.compile("(?<!\\!)\\[([^\\]]+)]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)");
-    private static final Pattern HTML_LINK_PATTERN =
-        Pattern.compile("(?i)<a\\b([^>]*)href\\s*=\\s*['\"]([^'\"]+)['\"]([^>]*)>(.*?)</a>");
-    private static final Pattern REL_PATTERN =
-        Pattern.compile("(?i)rel\\s*=\\s*['\"]([^'\"]+)['\"]");
     private static final Set<String> TRACKING_QUERY_KEYS = Set.of(
         "fbclid", "gclid", "igshid", "mc_cid", "mc_eid", "ref", "source", "spm"
     );
@@ -54,45 +55,23 @@ public class AstraHubGraphTransformService {
     }
 
     public Mono<GraphPayload> buildBpGraphV1Payload(String syncReason) {
-        return buildBpGraphV1Payload(null, "", syncReason);
+        return buildBpGraphV1Payload(null, syncReason);
     }
 
     public Mono<GraphPayload> buildBpGraphV1Payload(ServerRequest request) {
-        return buildBpGraphV1Payload(request, "", "");
+        return buildBpGraphV1Payload(request, "");
     }
 
     public Mono<GraphPayload> buildBpGraphV1Payload(ServerRequest request, String syncReason) {
-        return buildBpGraphV1Payload(request, "", syncReason);
-    }
-
-    public Mono<GraphPayload> buildBpGraphV1PayloadSince(String updatedSince) {
-        return buildBpGraphV1Payload(null, updatedSince, "");
-    }
-
-    public Mono<GraphPayload> buildBpGraphV1PayloadSince(String updatedSince, String syncReason) {
-        return buildBpGraphV1Payload(null, updatedSince, syncReason);
-    }
-
-    public Mono<GraphPayload> buildBpGraphV1PayloadSince(String updatedSince, ServerRequest request) {
-        return buildBpGraphV1Payload(request, updatedSince, "");
-    }
-
-    public Mono<GraphPayload> buildBpGraphV1PayloadSince(String updatedSince, ServerRequest request, String syncReason) {
-        return buildBpGraphV1Payload(request, updatedSince, syncReason);
-    }
-
-    private Mono<GraphPayload> buildBpGraphV1Payload(ServerRequest request, String updatedSince, String syncReason) {
         Mono<AstraHubCollectionService.CollectedPayload> linksMono =
             request == null ? collectionService.collect() : collectionService.collect(request);
-        Mono<AstraHubContentCollectionService.CollectedContentPayload> contentMono =
-            trim(updatedSince).isEmpty()
-                ? (request == null ? contentCollectionService.collect() : contentCollectionService.collect(request))
-                : (request == null
-                    ? contentCollectionService.collectIncremental(updatedSince)
-                    : contentCollectionService.collectIncremental(updatedSince, request));
+        Mono<AstraHubContentCollectionService.SiteBaseInfo> baseInfoMono =
+            request == null
+                ? contentCollectionService.resolveSiteBaseInfo()
+                : contentCollectionService.resolveSiteBaseInfo(request);
 
         return Mono.zip(
-            contentMono,
+            baseInfoMono,
             linksMono,
             readSetting("connection"),
             readSetting("credentials")
@@ -116,14 +95,15 @@ public class AstraHubGraphTransformService {
     }
 
     private GraphPayload transform(
-        AstraHubContentCollectionService.CollectedContentPayload contentPayload,
+        AstraHubContentCollectionService.SiteBaseInfo baseInfo,
         AstraHubCollectionService.CollectedPayload linkPayload,
         JsonNode connection,
         JsonNode credentials,
         String syncReason
     ) {
+        String baseUrl = baseInfo.baseUrl();
         String snapshotAt = maxInstant(
-            normalizeDateTime(contentPayload.collectedAt(), ""),
+            normalizeDateTime(baseInfo.collectedAt(), ""),
             normalizeDateTime(linkPayload.collectedAt(), "")
         );
         if (snapshotAt.isEmpty()) {
@@ -135,11 +115,12 @@ public class AstraHubGraphTransformService {
         String siteRssUrl = readString(connection, "siteRssUrl", "");
         String siteUrl = readString(connection, "siteUrl", "");
         String normalizedSiteUrl = firstNonBlank(
-            normalizeContentUrl(siteUrl, contentPayload.baseUrl()),
-            normalizeContentUrl(contentPayload.baseUrl(), siteUrl),
+            normalizeContentUrl(siteUrl, baseUrl),
+            normalizeContentUrl(baseUrl, siteUrl),
             trim(siteUrl)
         );
-        String normalizedSiteRssUrl = normalizeOptionalAbsoluteUrl(siteRssUrl, firstNonBlank(normalizedSiteUrl, contentPayload.baseUrl()));
+        String normalizedSiteRssUrl =
+            normalizeOptionalAbsoluteUrl(siteRssUrl, firstNonBlank(normalizedSiteUrl, baseUrl));
 
         GraphSource source = new GraphSource(
             "halo",
@@ -150,18 +131,16 @@ public class AstraHubGraphTransformService {
             normalizedSiteUrl,
             nodeName,
             nodeName,
-            normalizeOptionalAbsoluteUrl(nodeAvatar, firstNonBlank(normalizedSiteUrl, contentPayload.baseUrl())),
+            normalizeOptionalAbsoluteUrl(nodeAvatar, firstNonBlank(normalizedSiteUrl, baseUrl)),
             normalizedSiteRssUrl,
             normalizeSyncReason(syncReason),
-            deriveOwner(contentPayload.contents()),
-            deriveLanguage(contentPayload.contents())
+            "",
+            ""
         );
 
         GraphConsent graphConsent = new GraphConsent(true, "v1", snapshotAt);
 
         Map<String, GraphGroup> groupById = new LinkedHashMap<>();
-        Map<String, FriendSiteRef> friendByExactUrl = new LinkedHashMap<>();
-        Map<String, FriendSiteRef> friendBySiteRoot = new LinkedHashMap<>();
         Map<String, String> friendGroupNames = new LinkedHashMap<>();
 
         for (AstraHubCollectionService.GroupSnapshot group : linkPayload.groups()) {
@@ -175,83 +154,7 @@ public class AstraHubGraphTransformService {
             ));
         }
 
-        for (AstraHubCollectionService.LinkSnapshot link : linkPayload.links()) {
-            String normalizedUrl = normalizeContentUrl(link.url(), contentPayload.baseUrl());
-            if (normalizedUrl.isEmpty()) {
-                continue;
-            }
-            FriendSiteRef ref = new FriendSiteRef(
-                normalizedUrl,
-                normalizeSiteRoot(normalizedUrl),
-                sanitizeEmailText(link.title())
-            );
-            friendByExactUrl.putIfAbsent(normalizedUrl, ref);
-            if (!ref.siteRoot().isEmpty()) {
-                friendBySiteRoot.putIfAbsent(ref.siteRoot(), ref);
-            }
-        }
-
-        for (AstraHubContentCollectionService.CollectedContent content : contentPayload.contents()) {
-            for (AstraHubContentCollectionService.GroupReference group : safeList(content.groups())) {
-                groupById.putIfAbsent(group.externalId(), new GraphGroup(
-                    group.externalId(),
-                    group.name(),
-                    group.priority(),
-                    Map.of("groupType", group.type())
-                ));
-            }
-        }
-
-        String siteRoot = normalizeSiteRoot(firstNonBlank(contentPayload.baseUrl(), siteUrl));
-        Map<String, String> sameSiteContentByUrl = new LinkedHashMap<>();
-        for (AstraHubContentCollectionService.CollectedContent content : contentPayload.contents()) {
-            String normalizedCanonical = normalizeContentUrl(content.canonicalUrl(), contentPayload.baseUrl());
-            if (!normalizedCanonical.isEmpty()) {
-                sameSiteContentByUrl.putIfAbsent(normalizedCanonical, content.externalId());
-            }
-        }
-
         List<GraphContent> contents = new ArrayList<>();
-        for (AstraHubContentCollectionService.CollectedContent content : contentPayload.contents()) {
-            RelationExtraction extraction = extractRelations(
-                content,
-                contentPayload.baseUrl(),
-                siteRoot,
-                sameSiteContentByUrl,
-                friendByExactUrl,
-                friendBySiteRoot
-            );
-
-            Map<String, Object> meta = cloneMap(content.meta());
-            meta.put("sourceType", "halo-content");
-            contents.add(new GraphContent(
-                content.externalId(),
-                normalizeContentUrl(content.canonicalUrl(), contentPayload.baseUrl()),
-                sanitizeEmailText(content.title()),
-                sanitizeEmailText(content.summary()),
-                normalizeOptionalAbsoluteUrl(
-                    content.cover(),
-                    firstNonBlank(content.canonicalUrl(), normalizedSiteUrl, contentPayload.baseUrl())
-                ),
-                trim(content.author()),
-                dedupeStrings(content.tags()),
-                mergeGraphTopics(content.topics(), content.sourceCategory(), content.series()),
-                sanitizeEmailText(content.sourceCategory()),
-                dedupeStrings(content.series()),
-                normalizeDateTime(content.createdAt(), snapshotAt),
-                normalizeDateTime(content.updatedAt(), snapshotAt),
-                normalizeDateTime(content.publishedAt(), snapshotAt),
-                firstNonBlank(content.status(), "published"),
-                firstNonBlank(content.visibility(), "public"),
-                trim(content.language()),
-                Math.max(content.wordCount(), 0),
-                content.groups().stream().map(AstraHubContentCollectionService.GroupReference::externalId).toList(),
-                extraction.outboundLinks(),
-                extraction.mentionedSites(),
-                extraction.relatedContentExternalIds(),
-                meta
-            ));
-        }
 
         for (AstraHubCollectionService.LinkSnapshot link : linkPayload.links()) {
             List<String> groupIds = new ArrayList<>();
@@ -268,12 +171,12 @@ public class AstraHubGraphTransformService {
                 }
             }
 
-            String linkUrl = normalizeContentUrl(link.url(), contentPayload.baseUrl());
+            String linkUrl = normalizeContentUrl(link.url(), baseUrl);
             String createdAt = normalizeDateTime(link.createdAt(), snapshotAt);
             Map<String, Object> meta = new LinkedHashMap<>();
             meta.put("sourceType", "friend-link");
             meta.put("priority", link.priority());
-            String rssUrl = normalizeOptionalAbsoluteUrl(link.rssUrl(), firstNonBlank(linkUrl, normalizedSiteUrl, contentPayload.baseUrl()));
+            String rssUrl = normalizeOptionalAbsoluteUrl(link.rssUrl(), firstNonBlank(linkUrl, normalizedSiteUrl, baseUrl));
             if (!rssUrl.isEmpty()) {
                 meta.put("rssUrl", rssUrl);
             }
@@ -283,7 +186,7 @@ public class AstraHubGraphTransformService {
                 linkUrl,
                 sanitizeEmailText(link.title()),
                 sanitizeEmailText(link.description()),
-                normalizeOptionalAbsoluteUrl(link.logo(), firstNonBlank(linkUrl, normalizedSiteUrl, contentPayload.baseUrl())),
+                normalizeOptionalAbsoluteUrl(link.logo(), firstNonBlank(linkUrl, normalizedSiteUrl, baseUrl)),
                 "",
                 List.of(),
                 dedupeStrings(topics),
@@ -323,7 +226,7 @@ public class AstraHubGraphTransformService {
                 selfLinkUrl,
                 sanitizeEmailText(source.siteName()),
                 "",
-                normalizeOptionalAbsoluteUrl(source.nodeAvatar(), firstNonBlank(selfLinkUrl, normalizedSiteUrl, contentPayload.baseUrl())),
+                normalizeOptionalAbsoluteUrl(source.nodeAvatar(), firstNonBlank(selfLinkUrl, normalizedSiteUrl, baseUrl)),
                 "",
                 List.of(),
                 List.of(),
@@ -349,107 +252,6 @@ public class AstraHubGraphTransformService {
         contents.sort(Comparator.comparing(GraphContent::publishedAt).reversed().thenComparing(GraphContent::title));
 
         return new GraphPayload(GRAPH_VERSION, source, snapshotAt, graphConsent, groups, contents);
-    }
-
-    private static RelationExtraction extractRelations(
-        AstraHubContentCollectionService.CollectedContent content,
-        String baseUrl,
-        String siteRoot,
-        Map<String, String> sameSiteContentByUrl,
-        Map<String, FriendSiteRef> friendByExactUrl,
-        Map<String, FriendSiteRef> friendBySiteRoot
-    ) {
-        LinkedHashMap<String, GraphOutboundLink> outboundByUrl = new LinkedHashMap<>();
-        LinkedHashMap<String, GraphMentionedSite> mentionedBySite = new LinkedHashMap<>();
-        LinkedHashSet<String> relatedIds = new LinkedHashSet<>();
-
-        collectMarkdownLinks(content.rawContent(), content.canonicalUrl(), baseUrl, outboundByUrl);
-        collectHtmlLinks(content.htmlContent(), content.canonicalUrl(), baseUrl, outboundByUrl);
-
-        for (Map.Entry<String, GraphOutboundLink> entry : List.copyOf(outboundByUrl.entrySet())) {
-            String targetUrl = entry.getKey();
-            GraphOutboundLink link = entry.getValue();
-            String targetRoot = normalizeSiteRoot(targetUrl);
-
-            if (!siteRoot.isEmpty() && siteRoot.equals(targetRoot)) {
-                String relatedId = sameSiteContentByUrl.get(targetUrl);
-                if (relatedId != null && !relatedId.equals(content.externalId())) {
-                    relatedIds.add(relatedId);
-                }
-                continue;
-            }
-
-            FriendSiteRef friendRef = Optional.ofNullable(friendByExactUrl.get(targetUrl))
-                .orElseGet(() -> targetRoot.isEmpty() ? null : friendBySiteRoot.get(targetRoot));
-            outboundByUrl.put(targetUrl, new GraphOutboundLink(
-                targetUrl,
-                link.anchorText(),
-                link.rel(),
-                classifyLinkType(link, friendRef)
-            ));
-
-            if (!targetRoot.isEmpty()) {
-                mentionedBySite.putIfAbsent(targetRoot, new GraphMentionedSite(
-                    targetRoot,
-                    friendRef != null ? friendRef.siteName() : firstNonBlank(link.anchorText(), targetRoot),
-                    friendRef != null ? 1.0 : 0.7
-                ));
-            }
-        }
-
-        return new RelationExtraction(
-            new ArrayList<>(outboundByUrl.values()),
-            new ArrayList<>(mentionedBySite.values()),
-            new ArrayList<>(relatedIds)
-        );
-    }
-
-    private static void collectMarkdownLinks(String rawContent, String canonicalUrl, String baseUrl, Map<String, GraphOutboundLink> outboundByUrl) {
-        Matcher matcher = MARKDOWN_LINK_PATTERN.matcher(firstNonBlank(rawContent, ""));
-        while (matcher.find()) {
-            String normalized = normalizeContentUrl(matcher.group(2), firstNonBlank(canonicalUrl, baseUrl));
-            if (!normalized.isEmpty()) {
-                outboundByUrl.putIfAbsent(normalized, new GraphOutboundLink(normalized, trim(matcher.group(1)), "", "reference"));
-            }
-        }
-    }
-
-    private static void collectHtmlLinks(String htmlContent, String canonicalUrl, String baseUrl, Map<String, GraphOutboundLink> outboundByUrl) {
-        Matcher matcher = HTML_LINK_PATTERN.matcher(firstNonBlank(htmlContent, ""));
-        while (matcher.find()) {
-            String normalized = normalizeContentUrl(matcher.group(2), firstNonBlank(canonicalUrl, baseUrl));
-            if (normalized.isEmpty()) {
-                continue;
-            }
-            String attrs = firstNonBlank(matcher.group(1), "") + " " + firstNonBlank(matcher.group(3), "");
-            GraphOutboundLink current = outboundByUrl.get(normalized);
-            outboundByUrl.put(normalized, new GraphOutboundLink(
-                normalized,
-                firstNonBlank(current == null ? "" : current.anchorText(), AstraHubContentCollectionService.stripMarkup(matcher.group(4))),
-                firstNonBlank(current == null ? "" : current.rel(), extractRel(attrs)),
-                current == null ? "reference" : current.linkType()
-            ));
-        }
-    }
-
-    private static String classifyLinkType(GraphOutboundLink link, FriendSiteRef friendRef) {
-        if (friendRef != null) {
-            return "friend";
-        }
-        String rel = trim(link.rel()).toLowerCase(Locale.ROOT);
-        String anchor = trim(link.anchorText()).toLowerCase(Locale.ROOT);
-        if (rel.contains("citation") || rel.contains("cite") || anchor.contains("引用") || anchor.contains("参考")) {
-            return "citation";
-        }
-        if (rel.isEmpty() && anchor.isEmpty()) {
-            return "unknown";
-        }
-        return "reference";
-    }
-
-    private static String extractRel(String attributes) {
-        Matcher matcher = REL_PATTERN.matcher(firstNonBlank(attributes, ""));
-        return matcher.find() ? trim(matcher.group(1)) : "";
     }
 
     static String normalizeContentUrl(String rawUrl, String baseUrl) {
@@ -541,35 +343,6 @@ public class AstraHubGraphTransformService {
         }
     }
 
-    private static String deriveOwner(List<AstraHubContentCollectionService.CollectedContent> contents) {
-        Map<String, Integer> counter = new LinkedHashMap<>();
-        for (AstraHubContentCollectionService.CollectedContent content : contents) {
-            String owner = trim(content.author());
-            if (!owner.isEmpty()) {
-                counter.put(owner, counter.getOrDefault(owner, 0) + 1);
-            }
-        }
-        return counter.entrySet().stream().max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse("");
-    }
-
-    private static String deriveLanguage(List<AstraHubContentCollectionService.CollectedContent> contents) {
-        Map<String, Integer> counter = new LinkedHashMap<>();
-        for (AstraHubContentCollectionService.CollectedContent content : contents) {
-            String language = trim(content.language());
-            if (language.isEmpty()) {
-                language = AstraHubContentCollectionService.detectLanguage(content.title(), content.summary(), content.rawContent());
-            }
-            if (!language.isEmpty()) {
-                counter.put(language, counter.getOrDefault(language, 0) + 1);
-            }
-        }
-        return counter.entrySet().stream().max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse("");
-    }
-
-    private static Map<String, Object> cloneMap(Map<String, Object> input) {
-        return input == null || input.isEmpty() ? new LinkedHashMap<>() : new LinkedHashMap<>(input);
-    }
-
     private static JsonNode toJsonNode(Object value) throws Exception {
         if (value == null) {
             return MAPPER.createObjectNode();
@@ -630,14 +403,6 @@ public class AstraHubGraphTransformService {
         }
     }
 
-    private static boolean readBoolean(JsonNode node, String field, boolean fallback) {
-        if (node == null || node.isMissingNode()) {
-            return fallback;
-        }
-        JsonNode value = node.get(field);
-        return value == null || value.isNull() ? fallback : value.asBoolean(fallback);
-    }
-
     private static String readString(JsonNode node, String field, String fallback) {
         if (node == null || node.isMissingNode()) {
             return fallback;
@@ -660,15 +425,6 @@ public class AstraHubGraphTransformService {
             }
         }
         return new ArrayList<>(unique);
-    }
-
-    private static List<String> mergeGraphTopics(List<String> topics, String sourceCategory, List<String> series) {
-        List<String> merged = new ArrayList<>(safeList(topics));
-        if (!trim(sourceCategory).isEmpty()) {
-            merged.add(sourceCategory);
-        }
-        merged.addAll(safeList(series));
-        return dedupeStrings(merged);
     }
 
     private static String sanitizeEmailText(String value) {
@@ -714,6 +470,4 @@ public class AstraHubGraphTransformService {
     public record GraphContent(String externalId, String canonicalUrl, String title, String summary, String cover, String author, List<String> tags, List<String> topics, String sourceCategory, List<String> series, String createdAt, String updatedAt, String publishedAt, String status, String visibility, String language, int wordCount, List<String> groupExternalIds, List<GraphOutboundLink> outboundLinks, List<GraphMentionedSite> mentionedSites, List<String> relatedContentExternalIds, Map<String, Object> meta) {}
     public record GraphOutboundLink(String url, String anchorText, String rel, String linkType) {}
     public record GraphMentionedSite(String siteUrl, String siteName, double confidence) {}
-    private record FriendSiteRef(String exactUrl, String siteRoot, String siteName) {}
-    private record RelationExtraction(List<GraphOutboundLink> outboundLinks, List<GraphMentionedSite> mentionedSites, List<String> relatedContentExternalIds) {}
 }

@@ -19,7 +19,7 @@ class AstraHubGraphTransformIncrementalTest {
         new tools.jackson.databind.ObjectMapper();
 
     @Test
-    void shouldBuildIncrementalGraphPayloadFromFilteredContents() {
+    void shouldBuildGraphPayloadFromLinksAndBaseInfoOnly() {
         AstraHubCollectionService collectionService = mock(AstraHubCollectionService.class);
         AstraHubContentCollectionService contentCollectionService = mock(AstraHubContentCollectionService.class);
 
@@ -42,54 +42,21 @@ class AstraHubGraphTransformIncrementalTest {
             List.of(),
             List.of()
         )));
-
-        String since = "2026-04-02T00:00:00Z";
-        when(contentCollectionService.collectIncremental(since)).thenReturn(Mono.just(
-            new AstraHubContentCollectionService.CollectedContentPayload(
-                "2026-04-03T12:05:00Z",
-                "https://site.example",
-                List.of(
-                    new AstraHubContentCollectionService.CollectedContent(
-                        "post-2",
-                        "post",
-                        "https://site.example/posts/incremental",
-                        "Incremental Post",
-                        "Only changed content",
-                        "",
-                        "Serenity",
-                        List.of("Graph"),
-                        List.of("Creator Graph"),
-                        List.of(),
-                        "2026-04-02T08:00:00Z",
-                        "2026-04-03T10:00:00Z",
-                        "2026-04-02T08:00:00Z",
-                        "published",
-                        "public",
-                        "zh-CN",
-                        900,
-                        "no links",
-                        "<p>plain</p>",
-                        Map.of("contentKind", "post")
-                    )
-                )
-            )
+        when(contentCollectionService.resolveSiteBaseInfo()).thenReturn(Mono.just(
+            new AstraHubContentCollectionService.SiteBaseInfo("2026-04-03T12:05:00Z", "https://site.example")
         ));
 
         AstraHubGraphTransformService service =
             new AstraHubGraphTransformService(collectionService, contentCollectionService, settingFetcher);
 
-        AstraHubGraphTransformService.GraphPayload payload = service.buildBpGraphV1PayloadSince(since).block();
+        AstraHubGraphTransformService.GraphPayload payload = service.buildBpGraphV1Payload("manual_sync").block();
 
         assertThat(payload).isNotNull();
+        assertThat(payload.source().syncReason()).isEqualTo("manual_sync");
         assertThat(payload.contents())
             .extracting(AstraHubGraphTransformService.GraphContent::externalId)
-            .contains("self-link:site_abc123", "post-2");
-        assertThat(payload.contents())
-            .filteredOn(content -> "post-2".equals(content.externalId()))
-            .singleElement()
-            .extracting(AstraHubGraphTransformService.GraphContent::externalId)
-            .isEqualTo("post-2");
-        verify(contentCollectionService).collectIncremental(since);
+            .containsExactly("self-link:site_abc123");
+        verify(contentCollectionService).resolveSiteBaseInfo();
     }
 
     private static tools.jackson.databind.JsonNode parseSetting(String json) {

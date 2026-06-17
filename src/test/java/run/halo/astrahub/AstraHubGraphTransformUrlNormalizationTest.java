@@ -18,7 +18,7 @@ class AstraHubGraphTransformUrlNormalizationTest {
         new tools.jackson.databind.ObjectMapper();
 
     @Test
-    void shouldNormalizeNodeAvatarAndCoverToAbsoluteUrls() {
+    void shouldNormalizeNodeAvatarAndSelfLinkWithoutCollectingArticles() {
         AstraHubCollectionService collectionService = mock(AstraHubCollectionService.class);
         AstraHubContentCollectionService contentCollectionService = mock(AstraHubContentCollectionService.class);
 
@@ -41,35 +41,9 @@ class AstraHubGraphTransformUrlNormalizationTest {
             List.of(),
             List.of()
         )));
-
-        when(contentCollectionService.collect()).thenReturn(Mono.just(new AstraHubContentCollectionService.CollectedContentPayload(
-            "2026-04-03T12:05:00Z",
-            "https://site.example",
-            List.of(
-                new AstraHubContentCollectionService.CollectedContent(
-                    "post-1",
-                    "post",
-                    "https://site.example/posts/graph-engine",
-                    "Graph Engine Design",
-                    "Relationship graph overview",
-                    "/covers/graph.png",
-                    "Serenity",
-                    List.of("Graph"),
-                    List.of("Creator Graph"),
-                    List.of(),
-                    "2026-04-01T08:00:00Z",
-                    "2026-04-03T10:00:00Z",
-                    "2026-04-01T08:00:00Z",
-                    "published",
-                    "public",
-                    "zh-CN",
-                    1200,
-                    "no links",
-                    "<p>plain</p>",
-                    Map.of("contentKind", "post")
-                )
-            )
-        )));
+        when(contentCollectionService.resolveSiteBaseInfo()).thenReturn(Mono.just(
+            new AstraHubContentCollectionService.SiteBaseInfo("2026-04-03T12:05:00Z", "https://site.example")
+        ));
 
         AstraHubGraphTransformService service =
             new AstraHubGraphTransformService(collectionService, contentCollectionService, settingFetcher);
@@ -83,12 +57,11 @@ class AstraHubGraphTransformUrlNormalizationTest {
         assertThat(payload.source().nodeAvatar()).isEqualTo("https://site.example/avatar.png");
         assertThat(payload.contents())
             .extracting(AstraHubGraphTransformService.GraphContent::externalId)
-            .contains("self-link:site_abc123", "post-1");
-        AstraHubGraphTransformService.GraphContent content = payload.contents().stream()
-            .filter(item -> "post-1".equals(item.externalId()))
-            .findFirst()
-            .orElseThrow();
-        assertThat(content.cover()).isEqualTo("https://site.example/covers/graph.png");
+            .containsExactly("self-link:site_abc123");
+
+        AstraHubGraphTransformService.GraphContent self = payload.contents().getFirst();
+        assertThat(self.cover()).isEqualTo("https://site.example/avatar.png");
+        assertThat(self.meta()).containsEntry("sourceType", "self-link");
     }
 
     private static tools.jackson.databind.JsonNode parseSetting(String json) {

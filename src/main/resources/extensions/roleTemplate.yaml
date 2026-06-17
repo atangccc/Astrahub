@@ -65,6 +65,7 @@ kind: Role
 metadata:
   name: astrahub-role-template-anonymous-public
   labels:
+    halo.run/hidden: "true"
     rbac.authorization.halo.run/aggregate-to-anonymous: "true"
 rules:
   - apiGroups: ["anonymous.astrahub.halo.run"]

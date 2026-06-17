@@ -1,4 +1,4 @@
-export interface ConnectionSettings {
+﻿export interface ConnectionSettings {
   hubBaseUrl: string;
   registerToken: string;
   siteName: string;
@@ -105,19 +105,16 @@ export interface GraphContentPreview {
   meta: Record<string, unknown>;
 }
 
-export interface PlanetLinkSourceSite {
-  name: string;
-  url: string;
-}
-
 export interface PlanetLinkItem {
   url: string;
   title: string;
   description: string;
   logo?: string;
-  tags?: string[];
   updatedAt: string;
-  sourceSites: PlanetLinkSourceSite[];
+  sourceSiteCount?: number;
+  galaxyName?: string;
+  acceptedInvitationCount?: number;
+  hotRank?: number;
   relationKind?: string;
   // relationStatus 是服务端算好的权威关系展示状态（self/mutual/following/
   // follower/invite_sent/invitable/none），前端只做枚举→文案映射，不自行推断。
@@ -462,3 +459,4 @@ export const HUB_PHASE_COLOR: Readonly<Record<HubPhase, string>> = {
   STOPPED: "#64748b",
   UNKNOWN: "#94a3b8",
 };
+
