@@ -9,22 +9,25 @@ import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
-import reactor.netty.http.client.HttpClient;
 import run.halo.app.core.extension.endpoint.CustomEndpoint;
 import run.halo.app.extension.GroupVersion;
 import run.halo.app.plugin.ReactiveSettingFetcher;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -56,12 +59,11 @@ import static org.springdoc.core.fn.builders.apiresponse.Builder.responseBuilder
 public class AstraHubGraphRouter implements CustomEndpoint {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    // 显式禁用重定向跟随：否则攻击者可用一个公网 URL 302 跳转到内网地址，
-    // 绕过下方基于 DNS 解析的 IP 校验。followRedirect(false) 确保只连初始(已校验)主机。
-    private static final WebClient AVATAR_CLIENT = WebClient.builder()
-        .clientConnector(new ReactorClientHttpConnector(
-            HttpClient.create().followRedirect(false)))
-        .codecs(c -> c.defaultCodecs().maxInMemorySize(2 * 1024 * 1024))
+    // Keep avatar probing off Reactor Netty. Some friend sites reset TLS handshakes
+    // for bots; Reactor logs those resets at WARN before business error handling.
+    private static final HttpClient AVATAR_HTTP_CLIENT = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(5))
+        .followRedirects(HttpClient.Redirect.NEVER)
         .build();
     /** Max payload returned to the browser. */
     private static final int AVATAR_MAX_BYTES = 2 * 1024 * 1024;
@@ -336,40 +338,74 @@ public class AstraHubGraphRouter implements CustomEndpoint {
     }
 
     private Mono<ServerResponse> fetchAvatar(URI uri, String rawUrl) {
-        return AVATAR_CLIENT.get()
-            .uri(uri)
-            .header(HttpHeaders.USER_AGENT, "AstraHub-Plugin-Avatar/1.0")
-            .header(HttpHeaders.ACCEPT, "image/*,*/*;q=0.8")
-            .exchangeToMono(response -> {
-                int status = response.statusCode().value();
-                if (status < 200 || status >= 300) {
-                    return response.releaseBody().then(ServerResponse.status(status).build());
+        return Mono.fromCallable(() -> fetchAvatarBlocking(uri))
+            .subscribeOn(Schedulers.boundedElastic())
+            .flatMap(result -> {
+                if (result.status() < 200 || result.status() >= 300) {
+                    return ServerResponse.status(result.status()).build();
                 }
-                String contentType = response.headers().contentType()
-                    .map(MediaType::toString)
-                    .orElse("image/png");
-                if (!contentType.toLowerCase().startsWith("image/") && !contentType.toLowerCase().contains("svg")) {
-                    return response.releaseBody().then(ServerResponse.badRequest().bodyValue("not an image"));
+                String contentType = result.contentType().isBlank() ? "image/png" : result.contentType();
+                String lowerContentType = contentType.toLowerCase();
+                if (!lowerContentType.startsWith("image/") && !lowerContentType.contains("svg")) {
+                    return ServerResponse.badRequest().bodyValue("not an image");
                 }
-                return response.bodyToMono(byte[].class)
-                    .flatMap(bytes -> {
-                        if (bytes.length == 0 || bytes.length > AVATAR_MAX_BYTES) {
-                            return ServerResponse.status(413).bodyValue("payload too large or empty");
-                        }
-                        DataBuffer buf = new DefaultDataBufferFactory().wrap(bytes);
-                        return ServerResponse.ok()
-                            .contentType(MediaType.parseMediaType(contentType))
-                            .header(HttpHeaders.CACHE_CONTROL, "public, max-age=3600")
-                            .body((resp, ctx) -> resp.writeWith(Mono.just(buf)));
-                    });
+                byte[] bytes = result.bytes();
+                if (bytes.length == 0 || bytes.length > AVATAR_MAX_BYTES) {
+                    return ServerResponse.status(413).bodyValue("payload too large or empty");
+                }
+                DataBuffer buf = new DefaultDataBufferFactory().wrap(bytes);
+                return ServerResponse.ok()
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .header(HttpHeaders.CACHE_CONTROL, "public, max-age=3600")
+                    .body((resp, ctx) -> resp.writeWith(Mono.just(buf)));
             })
-            .timeout(Duration.ofSeconds(8))
             .onErrorResume(error -> {
-                // 上游头像 4xx/5xx/超时/连接重置等都很常见（友链失联、CDN 抖动），
-                // 不属于本插件错误，下沉到 DEBUG 防止刷屏。
+                // Upstream avatar 4xx/5xx/timeout/connection resets are normal for
+                // friend links and should not pollute production WARN logs.
                 log.debug("[AstraHub] avatar proxy failed url={}", rawUrl, error);
                 return ServerResponse.status(502).bodyValue("upstream failed");
             });
+    }
+
+    private static AvatarFetchResult fetchAvatarBlocking(URI uri) throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder(uri)
+            .timeout(Duration.ofSeconds(8))
+            .header(HttpHeaders.USER_AGENT, "AstraHub-Plugin-Avatar/1.0")
+            .header(HttpHeaders.ACCEPT, "image/*,*/*;q=0.8")
+            .GET()
+            .build();
+
+        HttpResponse<InputStream> response =
+            AVATAR_HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        int status = response.statusCode();
+        String contentType = response.headers().firstValue(HttpHeaders.CONTENT_TYPE).orElse("");
+
+        try (InputStream body = response.body()) {
+            if (status < 200 || status >= 300) {
+                return new AvatarFetchResult(status, contentType, new byte[0]);
+            }
+            return new AvatarFetchResult(status, contentType, readLimited(body, AVATAR_MAX_BYTES + 1));
+        }
+    }
+
+    private static byte[] readLimited(InputStream input, int maxBytes) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream(Math.min(maxBytes, 8192));
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+            int remaining = maxBytes - total;
+            if (remaining <= 0) {
+                break;
+            }
+            int writable = Math.min(read, remaining);
+            output.write(buffer, 0, writable);
+            total += read;
+            if (total > maxBytes) {
+                break;
+            }
+        }
+        return output.toByteArray();
     }
 
     /**
@@ -442,5 +478,8 @@ public class AstraHubGraphRouter implements CustomEndpoint {
         return String.valueOf(value == null ? "" : value)
             .replace("\\", "\\\\")
             .replace("\"", "\\\"");
+    }
+
+    private record AvatarFetchResult(int status, String contentType, byte[] bytes) {
     }
 }

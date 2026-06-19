@@ -528,7 +528,7 @@ function inviteButtonTone(item: PlanetLinkItem) {
 }
 
 function rowTone(item: PlanetLinkItem) {
-  return isSelfLink(item) ? "linked" : inviteButtonTone(item);
+  return isSelfLink(item) || Boolean(item.targetRegistered) ? "linked" : inviteButtonTone(item);
 }
 
 async function inviteLink(item: PlanetLinkItem) {
@@ -1214,7 +1214,7 @@ watch(
 .link-desc{margin-top:1px;font-size:12px;color:#64748b;line-height:1.45;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
 .hot-rank-badge{position:relative;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:36px;height:34px;color:#2563eb;background:transparent;border:none}
 .hot-rank-icon{width:24px;height:24px;fill:currentColor}
-.hot-rank-number{position:absolute;right:0;bottom:1px;display:flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:#fff;color:currentColor;border:1px solid rgba(148,163,184,.35);font-size:9px;font-weight:800;line-height:1;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.hot-rank-number{position:absolute;right:2px;bottom:3px;display:flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:999px;background:#fff;color:currentColor;border:1px solid rgba(148,163,184,.3);font-size:7px;font-weight:800;line-height:1;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .hot-rank-badge.rank-gold{color:#eab308}
 .hot-rank-badge.rank-silver{color:#94a3b8}
 .hot-rank-badge.rank-bronze{color:#cd7f32}

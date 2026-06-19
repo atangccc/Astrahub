@@ -911,8 +911,8 @@ watch(
               </div>
 
               <div class="time-cell">
-                <div>邀请：{{ formatTime(item.createdAt) }}</div>
-                <div v-if="item.reviewedAt">审核：{{ formatTime(item.reviewedAt) }}</div>
+                <div class="time-line">邀请：{{ formatTime(item.createdAt) }}</div>
+                <div v-if="item.reviewedAt" class="time-line">审核：{{ formatTime(item.reviewedAt) }}</div>
               </div>
 
               <div class="action-cell">
@@ -1026,7 +1026,7 @@ watch(
 .sp-header-btn:disabled{opacity:.5;cursor:not-allowed}
 .friend-table-wrap{position:relative;flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column}
 .friend-table{display:flex;flex-direction:column;min-width:0;gap:8px;padding:4px 0;flex:1;min-height:100%}
-.friend-row{display:grid;grid-template-columns:46px minmax(150px,.95fr) 38px minmax(150px,1fr) minmax(36px,.25fr) 104px 56px 148px 124px;gap:8px;align-items:center;padding:10px 12px;border-radius:20px;background:transparent;border:1px solid rgba(0,0,0,.05);box-shadow:0 2px 8px rgba(0,0,0,.03);box-sizing:border-box;height:60px}
+.friend-row{display:grid;grid-template-columns:46px minmax(150px,.95fr) 38px minmax(150px,1fr) minmax(36px,.25fr) 104px 56px 164px 124px;gap:8px;align-items:center;padding:10px 12px;border-radius:20px;background:transparent;border:1px solid rgba(0,0,0,.05);box-shadow:0 2px 8px rgba(0,0,0,.03);box-sizing:border-box;height:60px}
 .friend-row:hover{box-shadow:0 4px 14px rgba(0,0,0,.06)}
 .friend-row--pending{border-color:rgba(147,197,253,.3)}
 .friend-row--ok{border-color:rgba(134,239,172,.3)}
@@ -1044,6 +1044,8 @@ watch(
 .external-link:hover,.external-link:focus-visible{color:#4f46e5;text-decoration-color:currentColor}
 .external-link:focus-visible{outline:2px solid rgba(79,70,229,.35);outline-offset:2px;border-radius:4px}
 .rss-cell,.message-cell{word-break:break-word}
+.time-cell{white-space:nowrap}
+.time-line{white-space:nowrap}
 .desc-cell{display:flex;align-items:center;justify-content:center;overflow:visible}
 .desc-icon-trigger{position:relative;display:inline-flex;align-items:center;justify-content:center;color:#94a3b8;cursor:pointer;transition:color .15s}
 .desc-icon-trigger:hover{color:#4f46e5}
