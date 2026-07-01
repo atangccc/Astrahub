@@ -47,6 +47,10 @@ export interface ReadLaterSettings {
   items: ReadLaterItem[];
 }
 
+export interface StarGallerySettings {
+  timelineLimit: number;
+}
+
 export interface AstraHubSettings {
   connection: ConnectionSettings;
   credentials: CredentialSettings;
@@ -55,6 +59,7 @@ export interface AstraHubSettings {
   realtimeBroadcast: RealtimeBroadcastSettings;
   favorites: FavoritesSettings;
   readLater: ReadLaterSettings;
+  starGallery: StarGallerySettings;
 }
 
 export interface CollectedGroup {
@@ -112,6 +117,9 @@ export interface PlanetLinkItem {
   logo?: string;
   updatedAt: string;
   sourceSiteCount?: number;
+  sharedSourceCount?: number;
+  sharedNodeNames?: string[];
+  sourceSites?: PlanetLinkSourceSite[];
   galaxyName?: string;
   acceptedInvitationCount?: number;
   hotRank?: number;
@@ -125,6 +133,25 @@ export interface PlanetLinkItem {
   targetInvitationState?: string;
   targetInvitationMessage?: string;
   outboxInvitationActive?: boolean;
+}
+
+export interface PlanetLinkSourceSite {
+  id?: string;
+  name?: string;
+  url?: string;
+  nodeId?: string;
+  nodeName?: string;
+  nodeAvatar?: string;
+  nodeDescription?: string;
+  influenceScore?: number;
+  trustScore?: number;
+  friendLinkCount?: number;
+  category?: string;
+  contentId?: string;
+  title?: string;
+  description?: string;
+  logo?: string;
+  rssUrl?: string;
 }
 
 export interface PlanetLinksResponse {

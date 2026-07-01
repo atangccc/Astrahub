@@ -1,6 +1,6 @@
 {
   "name": "@halo-dev/plugin-astrahub",
-  "version": "2.0.7",
+  "version": "2.0.8",
   "description": "AstraHub star-link plugin console",
   "license": "GPL-3.0",
   "type": "module",

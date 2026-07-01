@@ -45,6 +45,7 @@ public class HubRealtimeBridge {
     static final String HUB_MASCOT_ARTICLE_CARD_TYPE = "mascot_article_card";
     static final String HUB_FRIEND_RELATION_REMOVED_TYPE = "friend_relation_removed";
     static final String HUB_SITE_PROFILE_UPDATED_TYPE = "site_profile_updated";
+    static final String HUB_PLANET_BROADCAST_TYPE = "planet_broadcast";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
@@ -56,6 +57,22 @@ public class HubRealtimeBridge {
     private static final Duration MIN_RECONNECT_DELAY = Duration.ofSeconds(3);
     private static final Duration MAX_RECONNECT_DELAY = Duration.ofSeconds(60);
     private static final int RECENT_EVENT_ID_LIMIT = 256;
+    private static final Set<String> STAR_GALLERY_EVENT_TYPES = Set.of(
+        "ws_ready",
+        "site_registered",
+        "site_restored",
+        "graph_pushed",
+        "site_relation_updated",
+        "friend_relation_removed",
+        "site_profile_updated",
+        "friend_invitation_created",
+        "friend_invitation_reviewed",
+        "friend_invitation_acked",
+        "friend_invitation_cancelled",
+        "friend_invitation_deleted",
+        HUB_MASCOT_ARTICLE_CARD_TYPE,
+        HUB_PLANET_BROADCAST_TYPE
+    );
 
     private final ReactiveSettingFetcher settingFetcher;
     private final AstraHubFriendManagementService friendManagementService;
@@ -74,6 +91,8 @@ public class HubRealtimeBridge {
     );
     private final RecentEventIds recentEventIds = new RecentEventIds(RECENT_EVENT_ID_LIMIT);
     private final Sinks.Many<HubMascotRealtimeEvent> mascotSink =
+        Sinks.many().multicast().directBestEffort();
+    private final Sinks.Many<StarGalleryRealtimeEvent> starGallerySink =
         Sinks.many().multicast().directBestEffort();
 
     @PostConstruct
@@ -100,11 +119,16 @@ public class HubRealtimeBridge {
             }
         }
         mascotSink.tryEmitComplete();
+        starGallerySink.tryEmitComplete();
         bridgeScheduler.dispose();
     }
 
     public Flux<HubMascotRealtimeEvent> mascotStream() {
         return mascotSink.asFlux();
+    }
+
+    public Flux<StarGalleryRealtimeEvent> starGalleryEvents() {
+        return starGallerySink.asFlux();
     }
 
     public HubRealtimeBridgeStatus runtimeStatus() {
@@ -189,6 +213,10 @@ public class HubRealtimeBridge {
             if (!recentEventIds.add(parsed.eventId())) {
                 return;
             }
+        }
+        StarGalleryRealtimeEvent starGalleryEvent = parseStarGalleryEvent(raw);
+        if (starGalleryEvent != null) {
+            starGallerySink.tryEmitNext(starGalleryEvent);
         }
         // Self-cleanup events are dispatched separately from mascot streams.
         if (parsed.relationRemoved() != null) {
@@ -304,6 +332,24 @@ public class HubRealtimeBridge {
             return parseSiteProfileUpdated(root, eventId);
         }
         return new ParsedHubEvent(eventId, null, null, null);
+    }
+
+    private static StarGalleryRealtimeEvent parseStarGalleryEvent(String raw) {
+        JsonNode root = parseJson(raw);
+        String eventId = text(root, "id");
+        String type = text(root, "type");
+        if (!STAR_GALLERY_EVENT_TYPES.contains(type)) {
+            return null;
+        }
+        JsonNode data = eventData(root);
+        return new StarGalleryRealtimeEvent(
+            eventId,
+            type,
+            firstNonBlank(text(data, "siteId"), text(data, "siteID")),
+            text(data, "sourceSiteId"),
+            text(data, "nodeId"),
+            text(data, "contentId")
+        );
     }
 
     private static ParsedHubEvent parseHubMascotBubble(JsonNode root, String eventId) {
@@ -549,6 +595,19 @@ public class HubRealtimeBridge {
         return value.isBlank() ? fallback : value;
     }
 
+    private static String firstNonBlank(String... values) {
+        if (values == null) {
+            return "";
+        }
+        for (String value : values) {
+            String safe = safe(value).trim();
+            if (!safe.isBlank()) {
+                return safe;
+            }
+        }
+        return "";
+    }
+
     private static String safe(String value) {
         return value == null ? "" : value;
     }
@@ -660,6 +719,16 @@ public class HubRealtimeBridge {
         String peerSiteId,
         String peerSiteUrl,
         String reason
+    ) {
+    }
+
+    public record StarGalleryRealtimeEvent(
+        String id,
+        String type,
+        String siteId,
+        String sourceSiteId,
+        String nodeId,
+        String contentId
     ) {
     }
 

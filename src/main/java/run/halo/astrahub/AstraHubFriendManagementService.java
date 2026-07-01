@@ -46,6 +46,7 @@ public class AstraHubFriendManagementService {
     private static final String HUB_CANCEL_PATH_TEMPLATE = "/v1/friend-invitations/%s/cancel";
     private static final String HUB_DELETE_PATH_TEMPLATE = "/v1/friend-invitations/%s/delete";
     private static final String HUB_REMOVE_RELATION_PATH_TEMPLATE = "/v1/friend-relations/%s/remove";
+    private static final String HUB_REMOVE_FOLLOW_PATH_TEMPLATE = "/v1/friend-follows/%s/remove";
     private static final String HUB_SITE_LOOKUP_PATH = "/v1/sites/lookup";
     private static final String HUB_SITE_RELATION_BATCH_PATH = "/v1/relations/sites/batch";
     private static final String HUB_WS_TOKEN_PATH = "/v1/ws-token";
@@ -161,6 +162,17 @@ public class AstraHubFriendManagementService {
     public Mono<RemoveFriendRelationResult> removeFriendRelation(RemoveFriendRelationCommand command) {
         return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
             .flatMap(tuple -> Mono.fromCallable(() -> removeFriendRelationBlocking(
+                    command,
+                    tuple.getT1(),
+                    tuple.getT2()
+                ))
+                .subscribeOn(Schedulers.boundedElastic())
+            );
+    }
+
+    public Mono<RemoveFriendRelationResult> removeOwnFriendFollow(RemoveFriendRelationCommand command) {
+        return Mono.zip(readSetting("connection"), credentialReader.readCredentials())
+            .flatMap(tuple -> Mono.fromCallable(() -> removeOwnFriendFollowBlocking(
                     command,
                     tuple.getT1(),
                     tuple.getT2()
@@ -719,6 +731,72 @@ public class AstraHubFriendManagementService {
         } catch (Exception error) {
             log.warn("[AstraHub] remove friend relation failed", error);
             return RemoveFriendRelationResult.failed(500, "remove relation failed: " + error.getMessage());
+        }
+    }
+
+    private RemoveFriendRelationResult removeOwnFriendFollowBlocking(
+        RemoveFriendRelationCommand command,
+        JsonNode connection,
+        JsonNode credentials
+    ) {
+        String hubBaseUrl = normalizeBaseUrl(readString(connection, "hubBaseUrl", ""));
+        String siteId = readString(credentials, "siteId", "");
+        String apiKey = readString(credentials, "apiKey", "");
+        String peerSiteId = trim(command.peerSiteId());
+
+        if (hubBaseUrl == null) {
+            return RemoveFriendRelationResult.failed(400, "hubBaseUrl is invalid");
+        }
+        if (siteId.isEmpty()) {
+            return RemoveFriendRelationResult.failed(400, "siteId is required");
+        }
+        if (apiKey.isEmpty()) {
+            return RemoveFriendRelationResult.failed(400, "apiKey is required");
+        }
+        if (peerSiteId.isEmpty()) {
+            return RemoveFriendRelationResult.failed(400, "peerSiteId is required");
+        }
+
+        String path = HUB_REMOVE_FOLLOW_PATH_TEMPLATE.formatted(peerSiteId);
+        String endpoint = hubBaseUrl + path;
+
+        try {
+            SignedRequest signed = HubRequestSigner.signRequest("POST", path, "", siteId, apiKey);
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .timeout(Duration.ofSeconds(15))
+                .header("Accept", "application/json")
+                .header("X-BP-Site-Id", signed.siteId())
+                .header("X-BP-Timestamp", signed.timestamp())
+                .header("X-BP-Nonce", signed.nonce())
+                .header("X-BP-Signature", signed.signature())
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+
+            HttpResponse<String> response = HTTP_CLIENT.send(
+                request,
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+            );
+
+            int statusCode = response.statusCode();
+            if (isRedirect(statusCode)) {
+                return RemoveFriendRelationResult.failed(statusCode, buildRedirectMessage(response, "remove follow failed"));
+            }
+            JsonNode json = parseJson(response.body());
+            if (statusCode < 200 || statusCode >= 300) {
+                return RemoveFriendRelationResult.failed(statusCode, extractMessage(json, "remove follow failed"));
+            }
+            return new RemoveFriendRelationResult(
+                true,
+                statusCode,
+                extractMessage(json, "ok"),
+                json.path("removed").asBoolean(false),
+                trim(json.path("peerSiteId").asText("")),
+                trim(json.path("peerSiteUrl").asText(""))
+            );
+        } catch (Exception error) {
+            log.warn("[AstraHub] remove own friend follow failed", error);
+            return RemoveFriendRelationResult.failed(500, "remove follow failed: " + error.getMessage());
         }
     }
 

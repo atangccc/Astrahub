@@ -110,6 +110,11 @@ public class AstraHubFriendManagementRouter implements CustomEndpoint {
                     .tag(tag)
                     .description("Remove the existing friend relation with peer site: deletes hub edge, sends notification mail, then removes local Halo Link CR")
                     .response(responseBuilder().description("Remove relation result")))
+            .POST("astrahub/friend-follows/{peerSiteId}/remove", this::removeOwnFriendFollow,
+                builder -> builder.operationId("RemoveAstraHubOwnFriendFollow")
+                    .tag(tag)
+                    .description("Remove only this site's follow edge to the peer site, without notification mail or reverse-edge changes")
+                    .response(responseBuilder().description("Remove follow result")))
             .build();
     }
 
@@ -446,6 +451,50 @@ public class AstraHubFriendManagementRouter implements CustomEndpoint {
             })
             .onErrorResume(error -> {
                 log.error("[AstraHub] remove friend relation error", error);
+                return ServerResponse.status(500)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(Map.of("success", false, "status", 500, "message", "internal error: " + error.getMessage()));
+            });
+    }
+
+    private Mono<ServerResponse> removeOwnFriendFollow(ServerRequest request) {
+        String peerSiteId = request.pathVariable("peerSiteId");
+        return friendManagementService.removeOwnFriendFollow(
+                new AstraHubFriendManagementService.RemoveFriendRelationCommand(peerSiteId, "")
+            )
+            .flatMap(result -> {
+                if (!result.success()) {
+                    int statusCode = result.status() >= 400 ? result.status() : 400;
+                    return ServerResponse.status(statusCode)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(Map.of(
+                            "success", false,
+                            "status", result.status(),
+                            "message", result.message()
+                        ));
+                }
+                String peerUrl = trim(result.peerSiteUrl());
+                Mono<AstraHubFriendLinkReconcileService.LocalLinkDeleteResult> localCleanup =
+                    peerUrl.isEmpty()
+                        ? Mono.just(AstraHubFriendLinkReconcileService.LocalLinkDeleteResult.notFound(""))
+                        : friendLinkReconcileService.deleteLocalLinkByPeerUrl(peerUrl);
+                return localCleanup
+                    .map(localResult -> Map.<String, Object>of(
+                        "success", true,
+                        "status", 200,
+                        "message", "ok",
+                        "removed", result.removed(),
+                        "peerSiteId", trim(result.peerSiteId()),
+                        "peerSiteUrl", peerUrl,
+                        "localLinkDeleted", localResult.deleted(),
+                        "localLinkMessage", trim(localResult.message())
+                    ))
+                    .flatMap(payload -> ServerResponse.ok()
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(payload));
+            })
+            .onErrorResume(error -> {
+                log.error("[AstraHub] remove own friend follow error", error);
                 return ServerResponse.status(500)
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(Map.of("success", false, "status", 500, "message", "internal error: " + error.getMessage()));

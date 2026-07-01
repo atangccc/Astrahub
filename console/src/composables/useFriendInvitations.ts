@@ -111,6 +111,37 @@ export async function removeFriendRelation(
   };
 }
 
+export async function removeOwnFriendFollow(peerSiteId: string): Promise<RemoveFriendRelationResult> {
+  const response = await fetch(
+    `/apis/api.plugin.halo.run/v1alpha1/astrahub/friend-follows/${encodeURIComponent(peerSiteId)}/remove`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json"
+      }
+    }
+  );
+
+  const payload = (await parseJson(response)) as Partial<RemoveFriendRelationResult> & {
+    message?: string;
+  };
+
+  if (!response.ok || !payload.success) {
+    throw new Error(payload.message || `删除友链失败（${response.status}）`);
+  }
+
+  return {
+    success: Boolean(payload.success),
+    status: Number(payload.status || response.status),
+    message: String(payload.message || "ok"),
+    removed: Boolean(payload.removed),
+    peerSiteId: String(payload.peerSiteId || peerSiteId),
+    peerSiteUrl: String(payload.peerSiteUrl || ""),
+    localLinkDeleted: Number(payload.localLinkDeleted || 0),
+    localLinkMessage: String(payload.localLinkMessage || "")
+  };
+}
+
 export async function cancelFriendInvitation(inviteId: string) {
   const response = await fetch(`/apis/api.plugin.halo.run/v1alpha1/astrahub/friend-invitations/${encodeURIComponent(inviteId)}/cancel`, {
     method: "POST",

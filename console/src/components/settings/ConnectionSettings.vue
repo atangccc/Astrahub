@@ -724,6 +724,19 @@ watch(
           </div>
           <label class="sp-toggle"><input type="checkbox" v-model="props.settings.widget.enabled" /><span class="sp-toggle-slider"></span></label>
         </div>
+        <div class="sp-form-item">
+          <label class="sp-form-label">星际资讯条数</label>
+          <input
+            v-model.number="props.settings.starGallery.timelineLimit"
+            class="sp-input"
+            type="number"
+            min="6"
+            max="120"
+            step="1"
+            placeholder="48"
+          />
+          <div class="sp-inline-note">控制星图库页面拉取的星际资讯数量，星系联盟展示方式请在主题设置中调整。</div>
+        </div>
       </div>
     </div>
 

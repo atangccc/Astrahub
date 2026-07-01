@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "run.halo.astrahub"
-version = project.findProperty("pluginVersion") ?: "0.1.0"
+version = project.findProperty("pluginVersion") ?: "2.5.9"
 
 repositories {
     mavenCentral()

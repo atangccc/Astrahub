@@ -42,6 +42,9 @@ function createDefaultSettings(): AstraHubSettings {
     },
     readLater: {
       items: []
+    },
+    starGallery: {
+      timelineLimit: 48
     }
   };
 }
@@ -72,6 +75,11 @@ export function useConfigMap() {
       const rawWidget = (dataRecord.widget || {}) as Record<string, unknown>;
       const rawFavorites = (dataRecord.favorites || {}) as Record<string, unknown>;
       const rawReadLater = (dataRecord.readLater || {}) as Record<string, unknown>;
+      const rawStarGallery = (dataRecord.starGallery || {}) as Record<string, unknown>;
+      const timelineLimitValue = Number(rawStarGallery.timelineLimit ?? defaults.starGallery.timelineLimit);
+      const timelineLimit = Number.isFinite(timelineLimitValue)
+        ? Math.min(120, Math.max(6, Math.floor(timelineLimitValue)))
+        : defaults.starGallery.timelineLimit;
 
       settings.value = {
         connection: {
@@ -103,6 +111,9 @@ export function useConfigMap() {
           items: Array.isArray(rawReadLater.items)
             ? (rawReadLater.items as ReadLaterItem[])
             : []
+        },
+        starGallery: {
+          timelineLimit
         }
       };
     } catch (error) {
@@ -129,6 +140,12 @@ export function useConfigMap() {
       const realtimeBroadcast = {
         enabled: Boolean(settings.value.realtimeBroadcast.enabled)
       };
+      const timelineLimitValue = Number(settings.value.starGallery.timelineLimit);
+      const starGallery = {
+        timelineLimit: Number.isFinite(timelineLimitValue)
+          ? Math.min(120, Math.max(6, Math.floor(timelineLimitValue)))
+          : 48
+      };
       const bodyBase = { ...configMapData.value };
       delete bodyBase.security;
       delete bodyBase.sync;
@@ -141,7 +158,8 @@ export function useConfigMap() {
         widget: settings.value.widget,
         realtimeBroadcast,
         favorites: settings.value.favorites,
-        readLater: settings.value.readLater
+        readLater: settings.value.readLater,
+        starGallery
       };
       await consoleApiClient.plugin.plugin.updatePluginJsonConfig({ name: PLUGIN_NAME, body });
       configMapData.value = body;
