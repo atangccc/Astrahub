@@ -52,6 +52,18 @@ rules:
       - "astrahub/sites/lookup"
       - "astrahub/transform-bp-graph"
       - "astrahub/ws-token"
+      - "astrahub/world-chat/bootstrap"
+      - "astrahub/world-chat/members"
+      - "astrahub/world-chat/members/{siteId}"
+      - "astrahub/world-chat/members/{siteId}/recent-posts"
+      - "astrahub/world-chat/messages"
+      - "astrahub/world-chat/messages/{messageId}/reports"
+      - "astrahub/world-chat/messages/{messageId}/retract"
+      - "astrahub/world-chat/read"
+      - "astrahub/world-chat/stickers"
+      - "astrahub/world-chat/stickers/{stickerId}/delete"
+      - "astrahub/world-chat/stickers/{stickerId}/file"
+      - "astrahub/world-chat/unread"
     verbs: ["get", "list", "create"]
   - apiGroups: ["api.plugin.halo.run"]
     resources: ["astrahub/ws/report-status"]

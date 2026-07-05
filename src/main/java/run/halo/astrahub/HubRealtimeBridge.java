@@ -70,6 +70,7 @@ public class HubRealtimeBridge {
         "friend_invitation_acked",
         "friend_invitation_cancelled",
         "friend_invitation_deleted",
+        "world_chat_message_created",
         HUB_MASCOT_ARTICLE_CARD_TYPE,
         HUB_PLANET_BROADCAST_TYPE
     );

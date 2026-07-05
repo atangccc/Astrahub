@@ -12,7 +12,10 @@ type HubInvitationRealtimeEventType =
   | "friend_invitation_cancelled"
   | "friend_invitation_deleted"
   | "friend_relation_removed"
-  | "site_relation_updated";
+  | "site_relation_updated"
+  | "world_chat_message_created"
+  | "world_chat_message_updated"
+  | "world_chat_mute_updated";
 
 export interface HubRealtimeEvent<T = unknown> {
   id?: string;
@@ -41,7 +44,10 @@ const HUB_INVITATION_REALTIME_EVENT_TYPES = new Set<HubInvitationRealtimeEventTy
   "friend_invitation_cancelled",
   "friend_invitation_deleted",
   "friend_relation_removed",
-  "site_relation_updated"
+  "site_relation_updated",
+  "world_chat_message_created",
+  "world_chat_message_updated",
+  "world_chat_mute_updated"
 ]);
 
 function isRelevantHubEvent(
@@ -63,6 +69,16 @@ function isRelevantHubEvent(
     }
     const impacted = Array.isArray(data.impactedSiteIds) ? data.impactedSiteIds : [];
     return impacted.some((id) => String(id || "").trim() === siteId);
+  }
+  if (type === "world_chat_message_created" || type === "world_chat_message_updated") {
+    return true;
+  }
+  if (type === "world_chat_mute_updated") {
+    const data = (event.data || {}) as { targetSiteId?: string; siteId?: string };
+    return (
+      String(data.targetSiteId || "").trim() === siteId ||
+      String(data.siteId || "").trim() === siteId
+    );
   }
   if (type === "friend_relation_removed") {
     // payload: { actorSiteId, peerSiteId, ... }，路由给主动方与被动方双方。

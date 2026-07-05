@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ForceGraph3D, { type ForceGraph3DInstance } from "3d-force-graph";
 import * as THREE from "three";
 import type { AstraHubSettings } from "../../types";
@@ -53,8 +53,10 @@ let resizeObserver: ResizeObserver | null = null;
 let decorStars: THREE.Points | null = null;
 const NODE_BOUNDARY_RADIUS = 200;
 const NODE_SPAWN_RADIUS = NODE_BOUNDARY_RADIUS * 0.45;
+let suppressNextFocusFlight = false;
 
 const credentialReady = computed(() => Boolean(props.settings?.credentials?.siteId));
+const renderStarted = ref(false);
 const isFullscreen = ref(false);
 const autoRotate = ref(true);
 const selectedNode = ref<GraphCanvasNode | null>(null);
@@ -128,22 +130,21 @@ function resetToOverview() {
   hoveredNodeId.value = null;
   searchQuery.value = "";
   searchOpen.value = false;
+  centerOverview(800);
+}
+
+function centerOverview(duration = 0) {
   if (!graph) return;
   graph.cameraPosition(
     { x: 0, y: 0, z: NODE_BOUNDARY_RADIUS * 2.6 },
     { x: 0, y: 0, z: 0 },
-    800
+    duration
   );
 }
 
 onMounted(async () => {
-  if (!canvasRef.value) return;
-  initGraph(canvasRef.value);
   document.addEventListener("fullscreenchange", onFullscreenChange);
   document.addEventListener("mousedown", onSearchDocumentClick);
-  if (credentialReady.value) {
-    await reset();
-  }
 });
 
 onBeforeUnmount(() => {
@@ -188,7 +189,7 @@ onBeforeUnmount(() => {
 watch(
   () => props.settings?.credentials?.siteId,
   async (next, prev) => {
-    if (next && next !== prev) {
+    if (renderStarted.value && next && next !== prev) {
       await reset();
     }
   }
@@ -198,6 +199,7 @@ watch(
   () => props.refreshSignal,
   async (next, prev) => {
     if (typeof next !== "number" || next === prev) return;
+    if (!renderStarted.value) return;
     await reset();
   }
 );
@@ -214,8 +216,24 @@ watch(
 watch(focusedId, (next) => {
   if (!graph || !next) return;
   refreshLinkVisuals();
+  if (suppressNextFocusFlight) {
+    suppressNextFocusFlight = false;
+    return;
+  }
   flyToNode(next);
 });
+
+async function startRendering() {
+  if (!credentialReady.value || renderStarted.value) return;
+  renderStarted.value = true;
+  suppressNextFocusFlight = true;
+  await nextTick();
+  if (canvasRef.value && !graph) {
+    initGraph(canvasRef.value);
+  }
+  await reset();
+  resetToOverview();
+}
 
 function initGraph(container: HTMLDivElement) {
   graph = new ForceGraph3D<ForceNode, ForceLink>(container, {
@@ -592,22 +610,9 @@ function drawAvatarTile(
 
 function buildNodeLabel(node: GraphCanvasNode): string {
   const safe = (s: string | undefined) => (s ? escapeHtml(s) : "");
-  const tagText =
-    node.kind === "self"
-      ? "我的站点"
-      : node.kind === "registered"
-      ? "已接入"
-      : "未接入";
-  const tagColor =
-    node.kind === "self"
-      ? "#f59e0b"
-      : node.kind === "registered"
-      ? "#60a5fa"
-      : "#94a3b8";
   return `
     <div style="display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;background:rgba(15,23,42,0.78);border:1px solid rgba(148,163,184,0.35);color:#e2e8f0;font-size:12px;font-family:system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.4);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);">
       <span style="font-weight:700;">${safe(node.title)}</span>
-      <span style="font-size:10px;color:${tagColor};">· ${tagText}</span>
     </div>
   `;
 }
@@ -1134,9 +1139,15 @@ const detailCardStyle = computed<Record<string, string>>(() => {
     </div>
 
     <div v-else ref="wrapRef" class="rg-canvas-wrap" :class="{ 'rg-fullscreen': isFullscreen }">
-      <div ref="canvasRef" class="rg-canvas"></div>
+      <div v-if="renderStarted" ref="canvasRef" class="rg-canvas"></div>
 
-      <div class="rg-toolbar">
+      <div v-if="!renderStarted" class="rg-start-overlay">
+        <button class="rg-start-btn" type="button" @click="startRendering">
+          <span class="rg-start-title">开始渲染</span>
+        </button>
+      </div>
+
+      <div v-if="renderStarted" class="rg-toolbar">
         <div ref="searchWrapRef" class="rg-search">
           <input
             type="text"
@@ -1179,10 +1190,6 @@ const detailCardStyle = computed<Record<string, string>>(() => {
                 <div class="rg-search-item-title">{{ node.title || node.url || "未命名站点" }}</div>
                 <div v-if="node.url" class="rg-search-item-sub">{{ node.url }}</div>
               </div>
-              <span
-                class="rg-search-item-tag"
-                :class="node.kind === 'unregistered' ? 'unregistered' : 'registered'"
-              >{{ node.kind === "unregistered" ? "未接入" : "已接入" }}</span>
             </button>
           </div>
         </div>
@@ -1225,7 +1232,7 @@ const detailCardStyle = computed<Record<string, string>>(() => {
       </div>
 
       <div
-        v-if="selectedNode"
+        v-if="renderStarted && selectedNode"
         class="rg-detail-card"
         :style="detailCardStyle"
       >
@@ -1267,7 +1274,7 @@ const detailCardStyle = computed<Record<string, string>>(() => {
         </div>
       </div>
 
-      <div v-if="showProgress && !error" class="rg-loading">
+      <div v-if="renderStarted && showProgress && !error" class="rg-loading">
         <div class="rg-spinner" aria-hidden="true"></div>
         <div class="rg-loading-text">loading</div>
         <div class="rg-loading-progress">
@@ -1276,10 +1283,10 @@ const detailCardStyle = computed<Record<string, string>>(() => {
           <span v-if="progress.capped" class="rg-progress-cap">· 已达节点上限</span>
         </div>
       </div>
-      <div v-else-if="error" class="rg-error">
+      <div v-else-if="renderStarted && error" class="rg-error">
         <p>{{ error }}</p>
       </div>
-      <div v-else-if="!loading && nodes.size === 0" class="rg-empty rg-empty-overlay">
+      <div v-else-if="renderStarted && !loading && nodes.size === 0" class="rg-empty rg-empty-overlay">
         <p>主星上还没有为你建立任何友链关系。</p>
         <p>请先把站点的友链同步到主星，然后回来查看。</p>
       </div>
@@ -1314,6 +1321,45 @@ const detailCardStyle = computed<Record<string, string>>(() => {
 }
 .rg-canvas { position: absolute; inset: 0; }
 :deep(.rg-canvas canvas) { outline: none; background: transparent; }
+
+.rg-start-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #02040a;
+}
+.rg-start-btn {
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  border: 1px solid rgba(148, 163, 184, .25);
+  background: rgba(2, 6, 23, .72);
+  color: #cbd5e1;
+  cursor: pointer;
+  padding: 0 16px;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.rg-start-btn:hover {
+  border-color: rgba(165, 180, 252, .55);
+  background: rgba(2, 6, 23, .9);
+  color: #fff;
+}
+.rg-start-btn:focus-visible {
+  outline: 2px solid rgba(165, 180, 252, .55);
+  outline-offset: 3px;
+}
+.rg-start-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .03em;
+  line-height: 1;
+}
 
 .rg-toolbar {
   position: absolute;
@@ -1457,22 +1503,6 @@ const detailCardStyle = computed<Record<string, string>>(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.rg-search-item-tag {
-  flex-shrink: 0;
-  padding: 2px 6px;
-  border-radius: 999px;
-  font-size: 10px;
-  letter-spacing: .02em;
-}
-.rg-search-item-tag.registered {
-  background: rgba(96, 165, 250, .2);
-  color: #93c5fd;
-}
-.rg-search-item-tag.unregistered {
-  background: rgba(148, 163, 184, .18);
-  color: #cbd5e1;
-}
-
 .rg-detail-card {
   position: absolute;
   z-index: 7;

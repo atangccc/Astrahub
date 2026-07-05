@@ -13,7 +13,7 @@ const ENDPOINT_NODE = "/apis/api.plugin.halo.run/v1alpha1/astrahub/graph/nodes";
 
 const FRIEND_LINK_PAGE_SIZE = 100;
 const NODES_FETCH_PAGE_SIZE = 100;
-const BFS_MAX_NODES = 1000;
+const BFS_MAX_NODES = 5000;
 const BFS_MAX_CONCURRENCY = 4;
 
 export interface GraphCanvasNode {

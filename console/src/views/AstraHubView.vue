@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { VLoading } from "@halo-dev/components";
 import { useConfigMap } from "../composables/useConfigMap";
 import {
@@ -11,6 +11,11 @@ import {
   useFriendInvitationRealtime,
   type HubRealtimeEvent
 } from "../composables/useFriendInvitationRealtime";
+import {
+  fetchWorldChatUnread,
+  hasWorldChatAccess,
+  markWorldChatRead
+} from "../composables/useWorldChat";
 import type { FriendInvitationItem } from "../types";
 
 import ConnectionSettings from "../components/settings/ConnectionSettings.vue";
@@ -18,8 +23,9 @@ import FriendInvitationManager from "../components/settings/FriendInvitationMana
 import NewsHubPanel from "../components/settings/NewsHubPanel.vue";
 import PlanetLinksPanel from "../components/settings/PlanetLinksPanel.vue";
 import RelationGraphPanel from "../components/settings/RelationGraphPanel.vue";
+import StarCommunicationsPanel from "../components/settings/StarCommunicationsPanel.vue";
 
-type NavId = "maintenance" | "planetLinks" | "friendManagement" | "news" | "relationGraph";
+type NavId = "maintenance" | "planetLinks" | "friendManagement" | "news" | "relationGraph" | "starComms";
 type FriendTab = "all" | "pending" | "accepted" | "rejected" | "outbox";
 type PlanetFilter = "all" | "pendingBack" | "following" | "mutual" | "favorites";
 
@@ -29,17 +35,54 @@ const planetFilter = ref<PlanetFilter>("all");
 const planetSearch = ref("");
 const newsSearch = ref("");
 const relationRefreshSignal = ref(0);
+const worldChatUnreadCount = ref(0);
 // 收件箱待审核 inviteId 集合：红点 = 集合大小。用 Set 去重保证幂等，
 // 本地审批/拒绝与 WS 回声携带同一 inviteId 时不会重复增减。
 const pendingInboxIds = ref<Set<string>>(new Set());
 const pendingInboxCount = computed(() => pendingInboxIds.value.size);
 // 父组件持有 WS，子组件只在挂载时通过此 prop 同步消费，避免重复连接 + 解决子组件未挂载时红点不变化的问题。
-// 事件类型涵盖所有 friend_invitation_* + site_relation_updated，data 形态由消费方按 type 分支解析。
+// 事件类型涵盖所有 friend_invitation_* + site_relation_updated + world_chat_*，data 形态由消费方按 type 分支解析。
 const lastRealtimeEvent = ref<HubRealtimeEvent<unknown> | null>(null);
 const { loading, saving, settings, fetchSettings, saveSettings } = useConfigMap();
 
 function refreshRelationGraph() {
   relationRefreshSignal.value += 1;
+}
+
+async function refreshWorldChatUnread() {
+  if (!hasWorldChatAccess(settings.value)) {
+    worldChatUnreadCount.value = 0;
+    return;
+  }
+  try {
+    const resp = await fetchWorldChatUnread();
+    worldChatUnreadCount.value = Math.max(0, Number(resp.unreadCount || 0));
+  } catch {
+    worldChatUnreadCount.value = 0;
+  }
+}
+
+async function clearWorldChatUnread() {
+  if (!hasWorldChatAccess(settings.value)) {
+    worldChatUnreadCount.value = 0;
+    return;
+  }
+  worldChatUnreadCount.value = 0;
+  try {
+    await markWorldChatRead();
+  } catch {
+    await refreshWorldChatUnread();
+  }
+}
+
+function openStarComms() {
+  activeNav.value = "starComms";
+  void clearWorldChatUnread();
+}
+
+function worldChatEventSenderSiteId(event: HubRealtimeEvent<unknown>) {
+  const payload = (event.data || {}) as { message?: { sender?: { siteId?: string } } };
+  return String(payload.message?.sender?.siteId || "").trim();
 }
 
 // 初次加载（或站点切换）时全量拉取一次收件箱 pending，重建集合。
@@ -112,9 +155,30 @@ async function autoReconcileAcceptedOutboxInvitation(invitation: FriendInvitatio
 // - 仅处理收件箱方向（toSite = 当前站点）；发件箱事件与本站待审数无关。
 // - created 且仍为 pending → add；其余（reviewed / cancelled / acked / deleted，或非 pending 状态）→ remove。
 // site_relation_updated 与红点无关，仅用于透传给子组件刷新友链卡片。
+// world_chat_message_created 只透传给星际通讯页面，不参与友链红点计算。
 // 同时把最新事件透传给子组件，子组件在挂载时按现有逻辑刷新列表行（不重复开 WS）。
 useFriendInvitationRealtime(settings, (event) => {
   lastRealtimeEvent.value = event;
+  if (event.type === "world_chat_message_created") {
+    const senderSiteId = worldChatEventSenderSiteId(event);
+    const myId = String(settings.value.credentials.siteId || "").trim();
+    if (senderSiteId && senderSiteId !== myId) {
+      if (activeNav.value === "starComms") {
+        void clearWorldChatUnread();
+      } else {
+        worldChatUnreadCount.value += 1;
+      }
+    }
+    return;
+  }
+  if (event.type === "world_chat_message_updated") {
+    if (activeNav.value === "starComms") {
+      void clearWorldChatUnread();
+    } else {
+      void refreshWorldChatUnread();
+    }
+    return;
+  }
   if (event.type === "site_relation_updated") {
     return;
   }
@@ -153,10 +217,26 @@ useFriendInvitationRealtime(settings, (event) => {
   }
 });
 
-onMounted(() => {
-  fetchSettings();
+onMounted(async () => {
+  await fetchSettings();
   refreshPendingInboxCount();
+  if (activeNav.value === "starComms") {
+    await clearWorldChatUnread();
+  } else {
+    await refreshWorldChatUnread();
+  }
 });
+
+watch(
+  () => settings.value.credentials.siteId,
+  () => {
+    if (activeNav.value === "starComms") {
+      void clearWorldChatUnread();
+    } else {
+      void refreshWorldChatUnread();
+    }
+  }
+);
 </script>
 
 <template>
@@ -177,6 +257,10 @@ onMounted(() => {
         <button class="ah-float-btn" :class="{ active: activeNav === 'relationGraph' }" title="关系图" @click="activeNav = 'relationGraph'">
           <svg viewBox="0 0 1024 1024" fill="currentColor" width="16" height="16"><path d="M825.137 881.283a38.598 38.598 0 0 1 11.48 3.978l25.445-72.991a72.623 72.623 0 0 1-12.082-2.249l-24.843 71.262z m-680.189-219.26a38.87 38.87 0 0 1-6.149 10.487l74.684 40.425a72.539 72.539 0 0 1 5.388-10.899l-73.923-40.013z m508.99-518.16l59.891 11.9a38.63 38.63 0 0 1 4.283-11.536l-64.089-12.734c0.142 1.859 0.237 3.731 0.237 5.627 0 2.275-0.118 4.521-0.322 6.743z m-58.603 194.801v-130a73.159 73.159 0 0 1-13.971 1.353 73.44 73.44 0 0 1-10.328-0.742v129.113c3.416-0.22 6.857-0.343 10.328-0.343 4.709 0 9.366 0.217 13.971 0.619z m-267.507 344.98a73.249 73.249 0 0 1 15.864 18.423l114.44-105.334a159.056 159.056 0 0 1-13.958-20.178L327.828 683.644z m492.365 2.223l-101.239-109.99a159.002 159.002 0 0 1-14.111 20.548l100.206 108.87a73.17 73.17 0 0 1 15.144-19.428z" /><path d="M740.062 496.744c0-82.938-63.626-151.004-144.728-158.08a160.558 160.558 0 0 0-13.971-0.619c-3.471 0-6.912 0.124-10.328 0.343-82.832 5.323-148.371 74.179-148.371 158.355 0 29.099 7.839 56.364 21.509 79.811a159.056 159.056 0 0 0 13.958 20.178c29.098 35.817 73.488 58.71 123.232 58.71 49.885 0 94.386-23.024 123.479-59.017a159.002 159.002 0 0 0 14.111-20.548c13.427-23.294 21.109-50.316 21.109-79.133zM327.828 683.644c-12.628-10.493-28.853-16.808-46.556-16.808-26.463 0-49.63 14.102-62.402 35.2a72.73 72.73 0 0 0-5.388 10.899 72.673 72.673 0 0 0-5.107 26.798c0 40.26 32.637 72.897 72.897 72.897s72.897-32.637 72.897-72.897c0-13.784-3.829-26.673-10.477-37.666a73.249 73.249 0 0 0-15.864-18.423z m541.478-16.808c-18.921 0-36.156 7.211-49.113 19.031a73.202 73.202 0 0 0-15.144 19.427c-5.509 10.257-8.64 21.981-8.64 34.438 0 33.566 22.694 61.815 53.57 70.287a72.52 72.52 0 0 0 12.082 2.249c2.383 0.235 4.799 0.36 7.244 0.36 40.26 0 72.897-32.637 72.897-72.897 0-40.258-32.637-72.895-72.896-72.895zM595.335 208.664c31.421-6.101 55.627-32.373 58.603-64.801 0.204-2.222 0.322-4.468 0.322-6.743 0-1.896-0.095-3.768-0.237-5.627-2.876-37.627-34.295-67.27-72.659-67.27-40.26 0-72.897 32.637-72.897 72.897 0 36.752 27.203 67.137 62.569 72.155a73.43 73.43 0 0 0 10.328 0.742c4.78 0 9.448-0.474 13.971-1.353zM713.085 163.341c0 21.472 17.406 38.878 38.878 38.878s38.878-17.406 38.878-38.878-17.406-38.878-38.878-38.878c-14.522 0-27.176 7.968-33.851 19.765a38.62 38.62 0 0 0-4.283 11.536 39.071 39.071 0 0 0-0.744 7.577z m-565.457 484.5c0-21.472-17.407-38.878-38.878-38.878-21.472 0-38.878 17.406-38.878 38.878s17.406 38.878 38.878 38.878c12.106 0 22.918-5.534 30.049-14.21a38.845 38.845 0 0 0 6.149-10.487 38.763 38.763 0 0 0 2.68-14.181z m670.651 232.827c-21.472 0-38.878 17.406-38.878 38.878s17.406 38.878 38.878 38.878 38.878-17.406 38.878-38.878c0-14.84-8.317-27.733-20.541-34.285a38.626 38.626 0 0 0-11.48-3.978 39.008 39.008 0 0 0-6.857-0.615z" /></svg>
         </button>
+        <button class="ah-float-btn" :class="{ active: activeNav === 'starComms' }" title="星际通讯" @click="openStarComms">
+          <svg viewBox="0 0 24 24" fill="none" width="16" height="16"><path d="M8 10h8M8 14h5M5 19V6.8C5 5.81 5.81 5 6.8 5h10.4c.99 0 1.8.81 1.8 1.8v7.4c0 .99-.81 1.8-1.8 1.8H10l-5 3z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          <span v-if="worldChatUnreadCount > 0" class="ah-nav-badge">{{ worldChatUnreadCount > 99 ? '99+' : worldChatUnreadCount }}</span>
+        </button>
         <button class="ah-float-btn" :class="{ active: activeNav === 'maintenance' }" title="接入配置" @click="activeNav = 'maintenance'">
           <svg viewBox="0 0 24 24" fill="none" width="16" height="16"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z" stroke="currentColor" stroke-width="2" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68 1.65 1.65 0 0 0 10 3.17V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2" /></svg>
         </button>
@@ -195,7 +279,7 @@ onMounted(() => {
             <path d="M970.474667 521.813333a14.08 14.08 0 0 0-10.24 0l-49.92 29.013334a13.653333 13.653333 0 0 0-5.12 18.346666 13.653333 13.653333 0 0 0 18.346666 4.693334l49.92-29.013334a13.226667 13.226667 0 0 0 5.12-17.92 13.226667 13.226667 0 0 0-8.106666-5.12zM754.581333 218.026667l23.466667-13.653334a29.013333 29.013333 0 0 0 10.666667-39.68 28.586667 28.586667 0 0 0-39.68-10.666666L576.234667 256a28.586667 28.586667 0 0 1-15.786667 0 29.013333 29.013333 0 0 1-17.92-13.653333 29.866667 29.866667 0 0 1 12.373333-40.96l85.333334-50.346667a390.826667 390.826667 0 0 0-526.933334 368.213333 394.24 394.24 0 0 0 37.973334 170.666667l-56.32 32.853333a20.053333 20.053333 0 0 0-7.253334 27.306667 19.626667 19.626667 0 0 0 12.373334 9.386667 20.053333 20.053333 0 0 0 14.933333-2.133334L243.434667 682.666667a32 32 0 0 1 34.56 16.213333 33.28 33.28 0 0 1-3.413334 38.826667L71.488 853.333333a29.44 29.44 0 0 0-10.666667 39.68 30.72 30.72 0 0 0 17.92 13.653334 29.866667 29.866667 0 0 0 21.76-2.986667L388.501333 738.133333a14.506667 14.506667 0 0 1 8.96 6.826667 15.36 15.36 0 0 1-5.546666 20.48l-119.466667 69.546667A389.12 389.12 0 0 0 834.794667 725.333333l-39.68 23.04a15.36 15.36 0 0 1-11.52 0 14.506667 14.506667 0 0 1-8.96-6.826666 14.933333 14.933333 0 0 1 5.546666-20.48l81.066667-47.36a395.093333 395.093333 0 0 0-106.666667-459.093334zM1016.981333 494.933333a12.373333 12.373333 0 0 0-13.226666 0 11.946667 11.946667 0 0 0-6.4 11.52 12.373333 12.373333 0 0 0 6.4 11.52 12.373333 12.373333 0 0 0 13.226666 0 13.226667 13.226667 0 0 0 6.4-11.52 12.373333 12.373333 0 0 0-6.4-11.52zM81.301333 357.12L85.568 354.133333a14.08 14.08 0 0 0 0-5.12v-2.986666A14.08 14.08 0 0 0 85.568 341.333333l-4.266667-3.413333h-27.733333v-23.466667a14.08 14.08 0 0 0 0-5.12l-2.986667-2.986666L42.901333 305.493333H37.781333a6.826667 6.826667 0 0 0-2.986666 2.986667 8.533333 8.533333 0 0 0 0 5.12v23.466667h-29.866667L0.234667 341.333333a14.08 14.08 0 0 0 0 5.12v2.986667a14.08 14.08 0 0 0 0 4.693333l2.986666 2.986667a8.533333 8.533333 0 0 0 5.12 0h24.32v22.613333a8.533333 8.533333 0 0 0 0.853334 4.266667 6.826667 6.826667 0 0 0 2.986666 2.986667H42.901333a14.08 14.08 0 0 0 5.12 0A9.813333 9.813333 0 0 0 52.714667 384a14.08 14.08 0 0 0 0-5.12v-20.906667h22.613333a8.533333 8.533333 0 0 0 5.973333-0.853333zM810.901333 165.12a27.733333 27.733333 0 0 0 28.16 0 28.16 28.16 0 1 0-28.16 0zM876.608 853.333333h-16.64v-12.8a6.826667 6.826667 0 0 0 0-3.84 3.84 3.84 0 0 0-2.56-2.56 6.826667 6.826667 0 0 0-3.84 0 5.12 5.12 0 0 0-3.84 0 5.546667 5.546667 0 0 0-2.986667 2.56 12.373333 12.373333 0 0 0 0 3.84v12.8h-16.64l-2.986666 2.986667a10.24 10.24 0 0 0 0 3.84 12.373333 12.373333 0 0 0 0 3.84l2.986666 2.986667h16.64v12.8a12.373333 12.373333 0 0 0 0 3.84 5.546667 5.546667 0 0 0 2.986667 2.56 5.12 5.12 0 0 0 3.84 0 6.826667 6.826667 0 0 0 3.84 0 3.84 3.84 0 0 0 2.56-2.56 6.826667 6.826667 0 0 0 0-3.84v-12.8h16.64s2.133333 0 2.56-2.986667a6.826667 6.826667 0 0 0 0-3.84 5.12 5.12 0 0 0 0-3.84s-1.706667-2.986667-2.56-2.986667z" fill="#8081FF" />
           </svg>
           <span class="ah-topbar-brand">ASTRA<span class="ah-topbar-accent">HUB</span></span>
-          <span class="ah-topbar-page-title" v-html="activeNav === 'maintenance' ? '星链<span class=ah-kw>接入配置</span>' : activeNav === 'planetLinks' ? '<span class=ah-kw>友链</span>星球' : activeNav === 'friendManagement' ? '<span class=ah-kw>友链</span>管理' : activeNav === 'relationGraph' ? '<span class=ah-kw>关系</span>图' : '星链<span class=ah-kw>资讯</span>'"></span>
+          <span class="ah-topbar-page-title" v-html="activeNav === 'maintenance' ? '星链<span class=ah-kw>接入配置</span>' : activeNav === 'planetLinks' ? '<span class=ah-kw>友链</span>星球' : activeNav === 'friendManagement' ? '<span class=ah-kw>友链</span>管理' : activeNav === 'relationGraph' ? '<span class=ah-kw>关系</span>图' : activeNav === 'starComms' ? '<span class=ah-kw>星际</span>通讯' : '星链<span class=ah-kw>资讯</span>'"></span>
         </div>
         <div class="ah-topbar-right">
           <template v-if="activeNav === 'planetLinks'">
@@ -267,6 +351,11 @@ onMounted(() => {
           v-if="!loading && activeNav === 'relationGraph'"
           :settings="settings"
           :refresh-signal="relationRefreshSignal"
+        />
+        <StarCommunicationsPanel
+          v-if="!loading && activeNav === 'starComms'"
+          :settings="settings"
+          :realtime-event="lastRealtimeEvent"
         />
       </div>
     </div><!-- /ah-body -->
@@ -465,3 +554,6 @@ onMounted(() => {
 @keyframes uvloading{0%{width:16px;transform:translateX(0px)}40%{width:100%;transform:translateX(0px)}80%{width:16px;transform:translateX(64px)}90%{width:100%;transform:translateX(0px)}100%{width:16px;transform:translateX(0px)}}
 @keyframes uvloading2{0%{transform:translateX(0px);width:16px}40%{transform:translateX(0%);width:80%}80%{width:100%;transform:translateX(0px)}90%{width:80%;transform:translateX(15px)}100%{transform:translateX(0px);width:16px}}
 </style>
+
+
+
