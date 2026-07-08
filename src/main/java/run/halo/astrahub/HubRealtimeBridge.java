@@ -14,10 +14,17 @@ import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import run.halo.app.plugin.ReactiveSettingFetcher;
+import run.halo.astrahub.util.HubRequestSigner;
+import run.halo.astrahub.util.HubRequestSigner.SignedRequest;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.net.http.WebSocket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -28,6 +35,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -86,6 +94,7 @@ public class HubRealtimeBridge {
     private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
     private final AtomicReference<WebSocket> currentWebSocket = new AtomicReference<>();
     private final AtomicReference<Disposable> reconnectTask = new AtomicReference<>();
+    private final AtomicReference<Disposable> currentSseTask = new AtomicReference<>();
     private final AtomicReference<String> lastEventId = new AtomicReference<>("");
     private final AtomicReference<HubRealtimeBridgeStatus> currentStatus = new AtomicReference<>(
         new HubRealtimeBridgeStatus(false, "INIT", "bridge not started", "", "", nowIso())
@@ -118,6 +127,10 @@ public class HubRealtimeBridge {
                 webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "plugin shutdown");
             } catch (Exception ignored) {
             }
+        }
+        Disposable sseTask = currentSseTask.getAndSet(null);
+        if (sseTask != null && !sseTask.isDisposed()) {
+            sseTask.dispose();
         }
         mascotSink.tryEmitComplete();
         starGallerySink.tryEmitComplete();
@@ -178,9 +191,166 @@ public class HubRealtimeBridge {
                         return;
                     }
                     updateStatus(false, "ERROR", safeMessage(error.getMessage(), "hub realtime connect failed"));
+                    connectSseOnce("websocket unavailable: " + safeMessage(error.getMessage(), "connect failed"));
+                }
+            );
+    }
+
+    private void connectSseOnce(String reason) {
+        if (!active.get()) {
+            return;
+        }
+        updateStatus(false, "SSE_CONNECTING", safeMessage(reason, "connecting to hub realtime by sse"));
+        Disposable task = Mono.zip(readHubBaseUrl(), credentialReader.readCredentials())
+            .flatMap(tuple -> Mono.fromRunnable(() -> runSseBlocking(tuple.getT1(), tuple.getT2()))
+                .subscribeOn(Schedulers.boundedElastic()))
+            .subscribe(
+                ignored -> {
+                    if (active.get()) {
+                        pollReplayOnce("sse completed");
+                        scheduleReconnect(nextReconnectDelay());
+                    }
+                },
+                error -> {
+                    if (!active.get()) {
+                        return;
+                    }
+                    updateStatus(false, "SSE_ERROR", safeMessage(error.getMessage(), "hub realtime sse failed"));
+                    pollReplayOnce("sse failed");
                     scheduleReconnect(nextReconnectDelay());
                 }
             );
+        Disposable oldTask = currentSseTask.getAndSet(task);
+        if (oldTask != null && !oldTask.isDisposed()) {
+            oldTask.dispose();
+        }
+    }
+
+    private void runSseBlocking(String hubBaseUrl, JsonNode credentials) {
+        HttpRequest request = buildSignedGetRequest(
+            hubBaseUrl,
+            "/v1/events/sse",
+            Map.of("lastEventId", lastEventId.get(), "replayLimit", "200"),
+            credentials
+        );
+        updateStatus(false, "SSE_CONNECTING", "connecting to hub realtime sse");
+        try {
+            HttpResponse<InputStream> response = HTTP_CLIENT.send(
+                request,
+                HttpResponse.BodyHandlers.ofInputStream()
+            );
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new IllegalStateException("hub realtime sse returned " + response.statusCode());
+            }
+            updateStatus(true, "SSE_CONNECTED", "hub realtime sse connected");
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+                StringBuilder data = new StringBuilder();
+                String line;
+                while (active.get() && (line = reader.readLine()) != null) {
+                    if (line.isBlank()) {
+                        emitSseData(data);
+                        data.setLength(0);
+                        continue;
+                    }
+                    if (line.startsWith(":")) {
+                        continue;
+                    }
+                    if (!line.startsWith("data:")) {
+                        continue;
+                    }
+                    String payload = line.substring("data:".length()).stripLeading();
+                    if (data.length() > 0) {
+                        data.append('\n');
+                    }
+                    data.append(payload);
+                }
+                emitSseData(data);
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException(safeMessage(error.getMessage(), "hub realtime sse failed"), error);
+        }
+    }
+
+    private void emitSseData(StringBuilder data) {
+        if (data == null || data.isEmpty()) {
+            return;
+        }
+        handleHubMessage(data.toString());
+    }
+
+    private void pollReplayOnce(String reason) {
+        if (!active.get()) {
+            return;
+        }
+        Mono.zip(readHubBaseUrl(), credentialReader.readCredentials())
+            .flatMap(tuple -> Mono.fromRunnable(() -> runReplayBlocking(tuple.getT1(), tuple.getT2()))
+                .subscribeOn(Schedulers.boundedElastic()))
+            .subscribe(
+                ignored -> {
+                },
+                error -> log.warn("[AstraHub] hub realtime replay failed: reason={}, message={}",
+                    reason, safeMessage(error.getMessage(), "replay failed"))
+            );
+    }
+
+    private void runReplayBlocking(String hubBaseUrl, JsonNode credentials) {
+        HttpRequest request = buildSignedGetRequest(
+            hubBaseUrl,
+            "/v1/events/replay",
+            Map.of("lastEventId", lastEventId.get(), "limit", "200"),
+            credentials
+        );
+        try {
+            HttpResponse<String> response = HTTP_CLIENT.send(
+                request,
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)
+            );
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new IllegalStateException("hub realtime replay returned " + response.statusCode());
+            }
+            JsonNode items = parseJson(response.body()).path("items");
+            if (!items.isArray()) {
+                return;
+            }
+            for (JsonNode item : items) {
+                if (item == null || item.isMissingNode() || item.isNull()) {
+                    continue;
+                }
+                handleHubMessage(item.toString());
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException(safeMessage(error.getMessage(), "hub realtime replay failed"), error);
+        }
+    }
+
+    private HttpRequest buildSignedGetRequest(String hubBaseUrl,
+                                              String path,
+                                              Map<String, String> query,
+                                              JsonNode credentials) {
+        String base = normalizeBaseUrl(hubBaseUrl);
+        String siteId = readString(credentials, "siteId", "");
+        String apiKey = readString(credentials, "apiKey", "");
+        if (base.isBlank()) {
+            throw new IllegalStateException("hubBaseUrl is required");
+        }
+        if (siteId.isBlank() || apiKey.isBlank()) {
+            throw new IllegalStateException("site credentials are required");
+        }
+        try {
+            SignedRequest signed = HubRequestSigner.signRequest("GET", path, "", siteId, apiKey);
+            return HttpRequest.newBuilder()
+                .uri(URI.create(base + path + buildQueryString(query)))
+                .timeout(Duration.ofSeconds(70))
+                .header("Accept", "text/event-stream, application/json")
+                .header("X-BP-Site-Id", signed.siteId())
+                .header("X-BP-Timestamp", signed.timestamp())
+                .header("X-BP-Nonce", signed.nonce())
+                .header("X-BP-Signature", signed.signature())
+                .GET()
+                .build();
+        } catch (Exception error) {
+            throw new IllegalStateException(safeMessage(error.getMessage(), "failed to sign realtime request"), error);
+        }
     }
 
     private Mono<String> readHubBaseUrl() {
@@ -589,6 +759,27 @@ public class HubRealtimeBridge {
 
     private static String urlEncode(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
+    private static String buildQueryString(Map<String, String> values) {
+        if (values == null || values.isEmpty()) {
+            return "";
+        }
+        StringBuilder query = new StringBuilder();
+        values.forEach((key, value) -> {
+            String name = safe(key).trim();
+            String text = safe(value).trim();
+            if (name.isBlank() || text.isBlank()) {
+                return;
+            }
+            if (query.length() == 0) {
+                query.append('?');
+            } else {
+                query.append('&');
+            }
+            query.append(urlEncode(name)).append('=').append(urlEncode(text));
+        });
+        return query.toString();
     }
 
     private static String safeMessage(String message, String fallback) {

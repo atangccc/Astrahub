@@ -1091,9 +1091,8 @@ function displayMemberName(member?: WorldChatMemberSummary | null) {
     return "AstrahBot";
   }
   const siteName = String(member?.name || member?.url || "未命名站点").trim();
-  const rawGalaxyName = String(member?.category || siteName).trim();
-  const galaxyName = rawGalaxyName.endsWith("星系") ? rawGalaxyName : `${rawGalaxyName}星系`;
-  return `${siteName} · ${galaxyName}`;
+  const galaxyName = String(member?.category || "").trim();
+  return galaxyName ? `${siteName} · ${galaxyName}` : siteName;
 }
 
 function isAssistantMember(member?: WorldChatMemberSummary | null) {
@@ -1105,9 +1104,8 @@ function mentionCandidateSubtitle(candidate: WorldChatMentionCandidate) {
     return candidate.description || "星链助手";
   }
   const siteName = String(candidate.name || candidate.url || "未命名站点").trim();
-  const rawGalaxyName = String(candidate.category || siteName).trim();
-  const galaxyName = rawGalaxyName.endsWith("星系") ? rawGalaxyName : `${rawGalaxyName}星系`;
-  return `${siteName} · ${galaxyName}`;
+  const galaxyName = String(candidate.category || "").trim();
+  return galaxyName ? `${siteName} · ${galaxyName}` : siteName;
 }
 
 function displayMessageMember(message: WorldChatMessage) {

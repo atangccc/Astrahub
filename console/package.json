@@ -1,6 +1,6 @@
 {
   "name": "@halo-dev/plugin-astrahub",
-  "version": "2.7.0",
+  "version": "2.7.4",
   "description": "AstraHub star-link plugin console",
   "license": "GPL-3.0",
   "type": "module",
@@ -10,14 +10,14 @@
   },
   "dependencies": {
     "3d-force-graph": "^1.80.0",
-    "@halo-dev/api-client": "^2.22.0",
-    "@halo-dev/components": "^2.22.0",
-    "@halo-dev/ui-shared": "^2.22.0",
+    "@halo-dev/api-client": "^2.25.2",
+    "@halo-dev/components": "^2.25.2",
+    "@halo-dev/ui-shared": "^2.25.2",
     "three": "^0.184.0",
     "vue": "^3.5.24"
   },
   "devDependencies": {
-    "@halo-dev/ui-plugin-bundler-kit": "^2.22.0",
+    "@halo-dev/ui-plugin-bundler-kit": "^2.25.2",
     "@iconify/json": "^2.2.407",
     "@rsbuild/core": "^1.0.0",
     "@rsbuild/plugin-vue": "^1.0.0",
