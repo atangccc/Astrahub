@@ -52,8 +52,18 @@ tasks.register("buildFrontend", PnpmTask) {
     dependsOn("installDepsForUI")
 }
 
+tasks.register("syncFrontendToUi", Sync) {
+    dependsOn("buildFrontend")
+    from("${project.projectDir}/src/main/resources/console")
+    into("${project.projectDir}/src/main/resources/ui")
+}
+
 tasks.register("installDepsForUI", PnpmTask) {
     args = ["install"]
+}
+
+tasks.named("processResources").configure {
+    dependsOn("syncFrontendToUi")
 }
 
 build {
